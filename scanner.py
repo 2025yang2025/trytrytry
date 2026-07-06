@@ -10,20 +10,22 @@ import random
 # ==============================================================================
 def fetch_all_us_market_tickers():
     us_tickers = set()
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    # 💡 升級標準瀏覽器標頭，防止被維基百科 403 封鎖
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
     try:
         print("🌐 正在初始化全美核心成分股資料庫 (S&P 500 & Nasdaq 100)...")
-        # 抓取 S&P 500
+        
+        # 抓取 S&P 500 (透過 storage_options 帶入 Headers)
         url_sp500 = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-        tables = pd.read_html(url_sp500)
+        tables = pd.read_html(url_sp500, storage_options=headers)
         sp500_df = tables[0]
         for sym in sp500_df['Symbol'].tolist():
             sym = str(sym).replace('.', '-')
             if sym.isalpha(): us_tickers.add(sym)
             
-        # 抓取 Nasdaq 100
+        # 抓取 Nasdaq 100 (透過 storage_options 帶入 Headers)
         url_ndx = "https://en.wikipedia.org/wiki/Nasdaq-100"
-        tables_ndx = pd.read_html(url_ndx)
+        tables_ndx = pd.read_html(url_ndx, storage_options=headers)
         for table in tables_ndx:
             if 'Ticker' in table.columns:
                 for sym in table['Ticker'].tolist():
@@ -86,13 +88,13 @@ def inspect_us_earnings_filter(ticker_symbol):
                 us_name_zh = us_chinese_names[ticker_symbol]
             else:
                 try:
-                    # 若不在預設字典，自動動態跟 yfinance 要該公司的官方精簡縮寫名稱
                     us_name_zh = ticker.info.get('shortName', ticker_symbol)
                 except Exception:
                     us_name_zh = ""
             
-            name_label = f" (*{us_name_zh}*)" if us_name_zh else ""
-            return f"• `{ticker_symbol}`{name_label}: 營收 `{rev_billion:.1f}B` (📈 `{rev_qoq:+.1f}%` QoQ) | 淨利 (🟢 `{net_qoq:+.1f}%` QoQ)"
+            # 💡 格式全面改為安全、容錯率高的 HTML 標籤
+            name_label = f" (<i>{us_name_zh}</i>)" if us_name_zh else ""
+            return f"• <code>{ticker_symbol}</code>{name_label}: 營收 <code>{rev_billion:.1f}B</code> (📈 <code>{rev_qoq:+.1f}%</code> QoQ) | 淨利 (🟢 <code>{net_qoq:+.1f}%</code> QoQ)"
             
     except Exception:
         pass
@@ -189,7 +191,7 @@ def check_technical_resonance(ticker):
     return False
 
 # ==============================================================================
-# 💬 Telegram 發送
+# 💬 Telegram 發送 (全 HTML 解析模式)
 # ==============================================================================
 def send_telegram_message(message):
     bot_token = os.environ.get("TG_BOT_TOKEN")
@@ -199,10 +201,13 @@ def send_telegram_message(message):
     if bot_token.lower().startswith("bot"): bot_token = bot_token[3:]
 
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": message, "parse_mode": "Markdown"}
+    # 💡 parse_mode 切換為 HTML
+    payload = {"chat_id": chat_id, "text": message, "parse_mode": "HTML"}
     try:
-        requests.post(url, json=payload, timeout=10)
-    except Exception: pass
+        res = requests.post(url, json=payload, timeout=10)
+        print(f"📢 TG 發送反饋: 狀態碼 {res.status_code} | 內容: {res.text}")
+    except Exception as e: 
+        print(f"❌ Telegram 發送異常: {e}")
 
 # ==============================================================================
 # 🚀 主程式
@@ -213,10 +218,10 @@ if __name__ == "__main__":
 
     # 🌅 早上時段：發送開盤前提醒
     if current_hour < 11:
-        if os.path.exists("results.md"):
-            with open("results.md", "r", encoding="utf-8") as f:
+        if os.path.exists("results.html"): # 💡 配合改為 HTML 檔案格式
+            with open("results.html", "r", encoding="utf-8") as f:
                 saved_content = f.read()
-            remind_msg = saved_content.replace("# 📊 *全球雙市場中文化策略選股報告*", "🔔 *【開盤前提醒】雙市場精選報告*")
+            remind_msg = saved_content.replace("<b>📊 全球雙市場中文化策略選股報告</b>", "🔔 <b>【開盤前提醒】雙市場精選報告</b>")
             send_telegram_message(remind_msg)
             print("✅ 晨間提醒流程執行完畢！")
         exit(0)
@@ -236,7 +241,8 @@ if __name__ == "__main__":
         if idx % 15 == 0: time.sleep(random.uniform(2.0, 3.5))
         if check_technical_resonance(ticker):
             name_zh = DYNAMIC_STOCK_NAMES.get(ticker, "")
-            stock_label = f"`{ticker}` (*{name_zh}*)" if name_zh else f"`{ticker}`"
+            # 💡 改用 HTML 的 code 與 italic 標籤，不因符號報錯
+            stock_label = f"<code>{ticker}</code>(<i>{name_zh}</i>)" if name_zh else f"<code>{ticker}</code>"
             strat1_matches.append(stock_label)
             if ticker in strat2_candidates: strat2_matches.append(stock_label)
             if ticker in strat3_candidates: strat3_matches.append(stock_label)
@@ -258,31 +264,34 @@ if __name__ == "__main__":
             us_growth_reports.append(report_line)
         time.sleep(0.5)
 
-    # 📝 格式化全球雙市場綜合報告
+    # 📝 格式化全球雙市場綜合報告 (全面採用安全可靠的 HTML 語法)
     tw_time_str = now_tw.strftime('%Y-%m-%d %H:%M:%S')
-    tg_msg = f"# 📊 *全球雙市場中文化策略選股報告*\n⏰ 執行時間: {tw_time_str}\n"
-    tg_msg += "---"
+    tg_msg = f"<b>📊 全球雙市場中文化策略選股報告</b>\n⏰ 執行時間: {tw_time_str}\n"
+    tg_msg += "───────────────────"
     
-    # 🇺🇸 美股專區 (全新中文化格式)
-    tg_msg += "\n\n🇺🇸 *【美股全市場：最新季度財報雙增長績優股】* 🚀\n"
-    tg_msg += "↳ *過濾條件*：最新單季營收與淨利雙增長企業。\n"
+    # 🇺🇸 美股專區
+    tg_msg += "\n\n🇺🇸 <b>【美股全市場：最新季度財報雙增長績優股】</b> 🚀\n"
+    tg_msg += "↳ <i>過濾條件</i>：最新單季營收與淨利雙增長企業。\n"
     if us_growth_reports:
         for r in us_growth_reports: tg_msg += f"{r}\n"
     else:
         tg_msg += "• 今日無符合雙增長條件之美股。 💤\n"
         
-    tg_msg += "---"
+    tg_msg += "───────────────────"
     
     # 🇹🇼 台股專區
-    tg_msg += "\n\n📈 *【台股策略一：原版多週期三頻共振】*\n"
+    tg_msg += "\n\n📈 <b>【台股策略一：原版多週期三頻共振】</b>\n"
     tg_msg += "• 符合標的：" + (", ".join(strat1_matches) if strat1_matches else "今日無符合標的。 💤") + "\n"
 
-    tg_msg += "\n🚀 *【台股策略二：獲利暴增 × 產業轉折爆發股】*\n"
+    tg_msg += "\n🚀 <b>【台股策略二：獲利暴增 × 產業轉折爆發股】</b>\n"
     tg_msg += "• 符合標的：" + (", ".join(strat2_matches) if strat2_matches else "今日無符合標的。 💤") + "\n"
 
-    tg_msg += "\n💎 *【台股策略三：高技術壁壘 × 抗震核心存股龍頭】*\n"
+    tg_msg += "\n💎 <b>【台股策略三：高技術壁壘 × 抗震核心存股龍頭】</b>\n"
     tg_msg += "• 符合標的：" + (", ".join(strat3_matches) if strat3_matches else "今日無符合標的。 💤") + "\n"
 
-    with open("results.md", "w", encoding="utf-8") as f: f.write(tg_msg)
+    # 將本地儲存檔由 .md 改為 .html 以供早晨提醒讀取
+    with open("results.html", "w", encoding="utf-8") as f: f.write(tg_msg)
+    
+    # 發送訊息
     send_telegram_message(tg_msg)
     print("✅ 全球雙市場中文化與全自動篩選流程順利完成！")
