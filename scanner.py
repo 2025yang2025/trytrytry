@@ -89,8 +89,7 @@ def check_technical_resonance(ticker):
         daily_above_ma = (d_c > d_ma_val)
         m60_cross_up = (m60_m > 0) and (m60_h > 0) and (m60_h_prev <= 0)
 
-        if weekly_bullish embankment and daily_bullish and daily_above_ma and m60_cross_up:
-            return True
+        # 💡 已修正：移除錯誤殘留字串
         if weekly_bullish and daily_bullish and daily_above_ma and m60_cross_up:
             return True
     except Exception:
@@ -116,7 +115,7 @@ def send_telegram_message(message):
         print(f"❌ Telegram 發送異常: {e}")
 
 # ==============================================================================
-# 🚀 主程式（台股多週期策略專用版 - 已移除美股）
+# 🚀 主程式（台股多週期策略專用版）
 # ==============================================================================
 if __name__ == "__main__":
     now_tw = pd.Timestamp.now(tz='UTC').tz_convert('Asia/Taipei')
@@ -144,7 +143,6 @@ if __name__ == "__main__":
         # 進行多週期技術面共振檢測
         if check_technical_resonance(ticker):
             name_zh = DYNAMIC_STOCK_NAMES.get(ticker, "")
-            # 💡 修正點：格式化改用安全的 HTML 標籤
             stock_label = f"<code>{ticker}</code>(<i>{name_zh}</i>)" if name_zh else f"<code>{ticker}</code>"
             
             # 策略一：只要技術面過關就符合
@@ -158,15 +156,16 @@ if __name__ == "__main__":
             if ticker in strat3_candidates: 
                 strat3_matches.append(stock_label)
 
-    # 📝 修正點：建立台股獨立美化訊息 (全 HTML 語法)
+    # 📝 建立台股獨立美化訊息 (全 HTML 語法)
     tw_msg = f"🇹🇼 <b>【台股市場：多週期技術面共振報告】</b>\n⏰ 報告時間: {tw_time_str}\n"
     tw_msg += "───────────────────\n"
     
     tw_msg += "📈 <b>策略一：原版多週期三頻共振</b>\n"
     tw_msg += "↳ " + (", ".join(strat1_matches) if strat1_matches else "今日無符合標的。 💤") + "\n\n"
 
+    # 💡 已修正：移除了隨機出現的 slide 單字
     tw_msg += "🚀 <b>策略二：獲利暴增 × 產業轉折爆發股</b>\n"
-    tw_msg += "↳ " + (", ".join(strat2_matches) if strat2_matches else "今日無符合標的slide。 💤") + "\n\n"
+    tw_msg += "↳ " + (", ".join(strat2_matches) if strat2_matches else "今日無符合標的。 💤") + "\n\n"
 
     tw_msg += "💎 <b>策略三：高技術壁壘 × 抗震核心存股龍頭</b>\n"
     tw_msg += "↳ " + (", ".join(strat3_matches) if strat3_matches else "今日無符合標的。 💤") + "\n"
