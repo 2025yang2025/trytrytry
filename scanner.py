@@ -6,101 +6,6 @@ import time
 import random
 
 # ==============================================================================
-# 🌐 【美股全自動動態獲取】標普 500 + 納斯達克 100 成分股總表
-# ==============================================================================
-def fetch_all_us_market_tickers():
-    us_tickers = set()
-    # 💡 升級標準瀏覽器標頭，防止被維基百科 403 封鎖
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
-    try:
-        print("🌐 正在初始化全美核心成分股資料庫 (S&P 500 & Nasdaq 100)...")
-        
-        # 抓取 S&P 500 (透過 storage_options 帶入 Headers)
-        url_sp500 = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-        tables = pd.read_html(url_sp500, storage_options=headers)
-        sp500_df = tables[0]
-        for sym in sp500_df['Symbol'].tolist():
-            sym = str(sym).replace('.', '-')
-            if sym.isalpha(): us_tickers.add(sym)
-            
-        # 抓取 Nasdaq 100 (透過 storage_options 帶入 Headers)
-        url_ndx = "https://en.wikipedia.org/wiki/Nasdaq-100"
-        tables_ndx = pd.read_html(url_ndx, storage_options=headers)
-        for table in tables_ndx:
-            if 'Ticker' in table.columns:
-                for sym in table['Ticker'].tolist():
-                    sym = str(sym).replace('.', '-')
-                    if sym.isalpha(): us_tickers.add(sym)
-                    
-        print(f"✅ 成功動態載入全美 {len(us_tickers)} 檔核心大型股代碼！")
-    except Exception as e:
-        print(f"⚠️ 抓取美股代碼時發生波動: {e}")
-        return ["NVDA", "AAPL", "MSFT", "AMZN", "META", "GOOGL", "AMD", "AVGO", "TSM", "QCOM"]
-        
-    return sorted(list(us_tickers))
-
-# ==============================================================================
-# 📊 【美股財報雙增長過濾】暨【美股中文名稱自動轉換】引擎
-# ==============================================================================
-def inspect_us_earnings_filter(ticker_symbol):
-    """
-    動態下載財報，【只回傳】營收與淨利雙雙成長(QoQ > 0)的精選股，並自動加上中文名稱
-    """
-    # 💡 建立美股核心巨頭中文對照表（其餘無對照的股票會自動改抓 yfinance 官方長名稱）
-    us_chinese_names = {
-        "NVDA": "輝達", "AAPL": "蘋果", "MSFT": "微軟", "AMZN": "亞馬遜", 
-        "META": "臉書", "GOOGL": "谷歌", "GOOG": "谷歌", "AMD": "超微", 
-        "AVGO": "博通", "TSM": "台積電ADR", "SMCI": "美超微", "ASML": "艾司摩爾", 
-        "QCOM": "高通", "MU": "美光", "INTC": "英特爾", "NFLX": "網飛", "TSLA": "特斯拉"
-    }
-
-    try:
-        ticker = yf.Ticker(ticker_symbol)
-        q_financials = ticker.quarterly_financials
-        
-        if q_financials.empty or q_financials.shape[1] < 2:
-            return None
-        
-        revenue_row = [idx for idx in q_financials.index if 'Total Revenue' in str(idx) or 'Revenue' in str(idx)]
-        net_income_row = [idx for idx in q_financials.index if 'Net Income' in str(idx)]
-        
-        if not revenue_row or not net_income_row:
-            return None
-            
-        rev_series = q_financials.loc[revenue_row[0]]
-        net_series = q_financials.loc[net_income_row[0]]
-        
-        rev_latest = float(rev_series.iloc[0])
-        rev_prev = float(rev_series.iloc[1])
-        net_latest = float(net_series.iloc[0])
-        net_prev = float(net_series.iloc[1])
-        
-        # 計算季增率 QoQ
-        rev_qoq = ((rev_latest - rev_prev) / rev_prev) * 100 if rev_prev != 0 else 0
-        net_qoq = ((net_latest - net_prev) / net_prev) * 100 if net_prev != 0 else 0
-        
-        # 💡 【核心篩選門檻】：必須營收與淨利雙雙大於 0% 
-        if rev_qoq > 0 and net_qoq > 0 and net_latest > 0:
-            rev_billion = rev_latest / 1e9
-            
-            # 💡 自動獲取美股中文/英文名稱機制
-            if ticker_symbol in us_chinese_names:
-                us_name_zh = us_chinese_names[ticker_symbol]
-            else:
-                try:
-                    us_name_zh = ticker.info.get('shortName', ticker_symbol)
-                except Exception:
-                    us_name_zh = ""
-            
-            # 💡 格式全面改為安全、容錯率高的 HTML 標籤
-            name_label = f" (<i>{us_name_zh}</i>)" if us_name_zh else ""
-            return f"• <code>{ticker_symbol}</code>{name_label}: 營收 <code>{rev_billion:.1f}B</code> (📈 <code>{rev_qoq:+.1f}%</code> QoQ) | 淨利 (🟢 <code>{net_qoq:+.1f}%</code> QoQ)"
-            
-    except Exception:
-        pass
-    return None
-
-# ==============================================================================
 # 🇹🇼 台股全市場與技術面模組 (保持全自動含中文功能)
 # ==============================================================================
 DYNAMIC_STOCK_NAMES = {}
@@ -184,6 +89,8 @@ def check_technical_resonance(ticker):
         daily_above_ma = (d_c > d_ma_val)
         m60_cross_up = (m60_m > 0) and (m60_h > 0) and (m60_h_prev <= 0)
 
+        if weekly_bullish embankment and daily_bullish and daily_above_ma and m60_cross_up:
+            return True
         if weekly_bullish and daily_bullish and daily_above_ma and m60_cross_up:
             return True
     except Exception:
@@ -201,7 +108,6 @@ def send_telegram_message(message):
     if bot_token.lower().startswith("bot"): bot_token = bot_token[3:]
 
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    # 💡 parse_mode 切換為 HTML
     payload = {"chat_id": chat_id, "text": message, "parse_mode": "HTML"}
     try:
         res = requests.post(url, json=payload, timeout=10)
@@ -238,8 +144,8 @@ if __name__ == "__main__":
         # 進行多週期技術面共振檢測
         if check_technical_resonance(ticker):
             name_zh = DYNAMIC_STOCK_NAMES.get(ticker, "")
-            # 格式化為：`2330` (*台積電*)
-            stock_label = f"`{ticker}` (*{name_zh}*)" if name_zh else f"`{ticker}`"
+            # 💡 修正點：格式化改用安全的 HTML 標籤
+            stock_label = f"<code>{ticker}</code>(<i>{name_zh}</i>)" if name_zh else f"<code>{ticker}</code>"
             
             # 策略一：只要技術面過關就符合
             strat1_matches.append(stock_label)
@@ -252,17 +158,17 @@ if __name__ == "__main__":
             if ticker in strat3_candidates: 
                 strat3_matches.append(stock_label)
 
-    # 📝 建立台股獨立美化訊息
-    tw_msg = f"🇹🇼 *【台股市場：多週期技術面共振報告】*\n⏰ 報告時間: {tw_time_str}\n"
-    tw_msg += "═" * 15 + "\n"
+    # 📝 修正點：建立台股獨立美化訊息 (全 HTML 語法)
+    tw_msg = f"🇹🇼 <b>【台股市場：多週期技術面共振報告】</b>\n⏰ 報告時間: {tw_time_str}\n"
+    tw_msg += "───────────────────\n"
     
-    tw_msg += "📈 *策略一：原版多週期三頻共振*\n"
+    tw_msg += "📈 <b>策略一：原版多週期三頻共振</b>\n"
     tw_msg += "↳ " + (", ".join(strat1_matches) if strat1_matches else "今日無符合標的。 💤") + "\n\n"
 
-    tw_msg += "🚀 *策略二：獲利暴增 × 產業轉折爆發股*\n"
-    tw_msg += "↳ " + (", ".join(strat2_matches) if strat2_matches else "今日無符合標的。 💤") + "\n\n"
+    tw_msg += "🚀 <b>策略二：獲利暴增 × 產業轉折爆發股</b>\n"
+    tw_msg += "↳ " + (", ".join(strat2_matches) if strat2_matches else "今日無符合標的slide。 💤") + "\n\n"
 
-    tw_msg += "💎 *策略三：高技術壁壘 × 抗震核心存股龍頭*\n"
+    tw_msg += "💎 <b>策略三：高技術壁壘 × 抗震核心存股龍頭</b>\n"
     tw_msg += "↳ " + (", ".join(strat3_matches) if strat3_matches else "今日無符合標的。 💤") + "\n"
 
     # 發送 Telegram
