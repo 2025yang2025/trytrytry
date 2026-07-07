@@ -6,7 +6,7 @@ import time
 import random
 
 # ==============================================================================
-# 🇹🇼 台股全市場與技術面模組 (保持全自動含中文功能)
+# 🇹🇼 台股全市場技術面模組 (保持全自動含中文功能)
 # ==============================================================================
 DYNAMIC_STOCK_NAMES = {}
 
@@ -20,10 +20,13 @@ def fetch_all_taiwan_market_tickers():
             for item in res.json():
                 code = item.get("Code", "").strip()
                 name = item.get("Name", "").strip()
+                # 過濾出 4 位數純數字的個股，並優先聚焦電子與核心製造業板塊（開頭為 23,24,30,32,34,35,36,37,61,62,64,80）
+                # 這樣既能涵蓋台股主流波動標的，又能防止直接掃描 1000 多檔導致 IP 被 yfinance 封鎖
                 if code.isdigit() and len(code) == 4:
-                    ticker_id = f"{code}.TW"
-                    all_tickers.append(ticker_id)
-                    DYNAMIC_STOCK_NAMES[ticker_id] = name
+                    if code.startswith(('23', '24', '30', '32', '34', '35', '36', '37', '61', '62', '64', '80')):
+                        ticker_id = f"{code}.TW"
+                        all_tickers.append(ticker_id)
+                        DYNAMIC_STOCK_NAMES[ticker_id] = name
     except Exception:
         pass
     if not all_tickers:
@@ -32,17 +35,6 @@ def fetch_all_taiwan_market_tickers():
             all_tickers.append(k)
             DYNAMIC_STOCK_NAMES[k] = v
     return sorted(list(set(all_tickers)))
-
-def fetch_fundamental_snapshot(tickers):
-    strat2_candidates = []
-    strat3_candidates = []
-    for tk in tickers:
-        pure_code = tk.split('.')[0]
-        if pure_code.startswith(('23', '24', '30', '32', '34', '35', '36', '37', '61', '62', '64', '80')):
-            strat2_candidates.append(tk)
-            if pure_code in ['2330', '2454', '3443', '3661', '6415', '3017', '3533', '6187']:
-                strat3_candidates.append(tk)
-    return strat2_candidates, strat3_candidates
 
 def calculate_macd(close_series, fast=12, slow=26, signal=9):
     fast_ema = close_series.ewm(span=fast, adjust=False).mean()
@@ -89,7 +81,6 @@ def check_technical_resonance(ticker):
         daily_above_ma = (d_c > d_ma_val)
         m60_cross_up = (m60_m > 0) and (m60_h > 0) and (m60_h_prev <= 0)
 
-        # 💡 已修正：移除錯誤殘留字串
         if weekly_bullish and daily_bullish and daily_above_ma and m60_cross_up:
             return True
     except Exception:
@@ -103,7 +94,9 @@ def send_telegram_message(message):
     bot_token = os.environ.get("TG_BOT_TOKEN")
     chat_id = os.environ.get("TG_CHAT_ID")
     if not bot_token or not chat_id: return
-    bot_token, chat_id = str(bot_token).strip(), str(chat_id).strip()
+    
+    bot_token = str(bot_token).strip()
+    chat_id = str(chat_id).strip()
     if bot_token.lower().startswith("bot"): bot_token = bot_token[3:]
 
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
@@ -115,7 +108,7 @@ def send_telegram_message(message):
         print(f"❌ Telegram 發送異常: {e}")
 
 # ==============================================================================
-# 🚀 主程式（台股多週期策略專用版）
+# 🚀 主程式（台股多週期三頻共振專用版）
 # ==============================================================================
 if __name__ == "__main__":
     now_tw = pd.Timestamp.now(tz='UTC').tz_convert('Asia/Taipei')
@@ -123,16 +116,10 @@ if __name__ == "__main__":
 
     print("🚀 啟動【台股多週期三頻共振】盤後策略報告...")
     
-    # 1. 抓取台股所有標的
-    ALL_TW_TICKERS = fetch_all_taiwan_market_tickers()
+    # 1. 獲取篩選後的台股核心標的名單
+    tech_scan_pool = fetch_all_taiwan_market_tickers()
     
-    # 2. 進行基本面/籌碼面初篩 (策略二與策略三候選名單)
-    strat2_candidates, strat3_candidates = fetch_fundamental_snapshot(ALL_TW_TICKERS)
-    
-    # 3. 聯集所有需要跑技術面檢測的標的，避免重複掃描
-    tech_scan_pool = sorted(list(set(strat2_candidates + strat3_candidates)))
-    
-    strat1_matches, strat2_matches, strat3_matches = [], [], []
+    strat1_matches = []
 
     print(f"⏳ 正在進行台股技術面安全分批掃描 (共 {len(tech_scan_pool)} 檔)...")
     for idx, ticker in enumerate(tech_scan_pool, 1):
@@ -145,30 +132,15 @@ if __name__ == "__main__":
             name_zh = DYNAMIC_STOCK_NAMES.get(ticker, "")
             stock_label = f"<code>{ticker}</code>(<i>{name_zh}</i>)" if name_zh else f"<code>{ticker}</code>"
             
-            # 策略一：只要技術面過關就符合
+            # 策略一：多週期三頻共振符合
             strat1_matches.append(stock_label)
-            
-            # 策略二：技術面過關 且 在基本面爆發名單中
-            if ticker in strat2_candidates: 
-                strat2_matches.append(stock_label)
-                
-            # 策略三：技術面過關 且 在核心存股名單中
-            if ticker in strat3_candidates: 
-                strat3_matches.append(stock_label)
 
-    # 📝 建立台股獨立美化訊息 (全 HTML 語法)
+    # 📝 建立精簡版台股獨立美化訊息 (全 HTML 語法)
     tw_msg = f"🇹🇼 <b>【台股市場：多週期技術面共振報告】</b>\n⏰ 報告時間: {tw_time_str}\n"
     tw_msg += "───────────────────\n"
     
-    tw_msg += "📈 <b>策略一：原版多週期三頻共振</b>\n"
-    tw_msg += "↳ " + (", ".join(strat1_matches) if strat1_matches else "今日無符合標的。 💤") + "\n\n"
-
-    # 💡 已修正：移除了隨機出現的 slide 單字
-    tw_msg += "🚀 <b>策略二：獲利暴增 × 產業轉折爆發股</b>\n"
-    tw_msg += "↳ " + (", ".join(strat2_matches) if strat2_matches else "今日無符合標的。 💤") + "\n\n"
-
-    tw_msg += "💎 <b>策略三：高技術壁壘 × 抗震核心存股龍頭</b>\n"
-    tw_msg += "↳ " + (", ".join(strat3_matches) if strat3_matches else "今日無符合標的。 💤") + "\n"
+    tw_msg += "📈 <b>原版多週期三頻共振符合標的</b>\n"
+    tw_msg += "↳ " + (", ".join(strat1_matches) if strat1_matches else "今日無符合標的。 💤") + "\n"
 
     # 發送 Telegram
     send_telegram_message(tw_msg)
