@@ -54,7 +54,7 @@ def extract_close_series(df):
 
 def check_technical_resonance(ticker):
     """
-    策略一：原版多週期三頻共振
+    策略一：原版多週期三頻共振 (MACD)
     """
     try:
         df_60m = yf.download(ticker, period="1mo", interval="60m", progress=False)
@@ -94,29 +94,64 @@ def check_ma_tangling(ticker):
     策略二：日K層級 5MA, 10MA, 20MA 均線糾結
     """
     try:
-        # 只需要獲取日K線數據
         df_daily = yf.download(ticker, period="3mo", interval="1d", progress=False)
         c_daily = extract_close_series(df_daily)
         
         if c_daily.empty or len(c_daily) < 20: return False
         
-        # 計算 5, 10, 20 日均線
         ma5 = c_daily.rolling(window=5).mean().iloc[-1]
         ma10 = c_daily.rolling(window=10).mean().iloc[-1]
         ma20 = c_daily.rolling(window=20).mean().iloc[-1]
         close_today = c_daily.iloc[-1]
         
-        # 找出三條線的最高與最低值
         max_ma = max(ma5, ma10, ma20)
         min_ma = min(ma5, ma10, ma20)
-        
-        # 計算糾結區間帶（最大與最小均線差值佔 20MA 的比例）
-        # 0.03 代表均線在 3% 寬度內，算非常糾結
         tangle_ratio = (max_ma - min_ma) / ma20
         
-        # 條件 1: 均線糾結度小於 2%
-        # 條件 2: 今日價格在 20MA 之上（代表偏多整理或準備向上突破）
-        if tangle_ratio < 0.02 and close_today > ma20:
+        if tangle_ratio < 0.03 and close_today > ma20:
+            return True
+    except Exception:
+        pass
+    return False
+
+def check_multi_timeframe_tangling(ticker):
+    """
+    策略三：60分K、日K、週K同步均線糾結 (三週公共振壓縮)
+    """
+    try:
+        # 一次性下載三個週期需要的數據
+        df_60m = yf.download(ticker, period="1mo", interval="60m", progress=False)
+        df_daily = yf.download(ticker, period="3mo", interval="1d", progress=False)
+        df_weekly = yf.download(ticker, period="1y", interval="1wk", progress=False)
+        
+        c_60m = extract_close_series(df_60m)
+        c_daily = extract_close_series(df_daily)
+        c_weekly = extract_close_series(df_weekly)
+        
+        if len(c_60m) < 20 or len(c_daily) < 20 or len(c_weekly) < 20: return False
+        
+        # 1. 60分K 糾結度計算
+        m60_ma5 = c_60m.rolling(window=5).mean().iloc[-1]
+        m60_ma10 = c_60m.rolling(window=10).mean().iloc[-1]
+        m60_ma20 = c_60m.rolling(window=20).mean().iloc[-1]
+        m60_tangle = (max(m60_ma5, m60_ma10, m60_ma20) - min(m60_ma5, m60_ma10, m60_ma20)) / m60_ma20
+        
+        # 2. 日K 糾結度計算
+        d_ma5 = c_daily.rolling(window=5).mean().iloc[-1]
+        d_ma10 = c_daily.rolling(window=10).mean().iloc[-1]
+        d_ma20 = c_daily.rolling(window=20).mean().iloc[-1]
+        d_tangle = (max(d_ma5, d_ma10, d_ma20) - min(d_ma5, d_ma10, d_ma20)) / d_ma20
+        
+        # 3. 週K 糾結度計算
+        w_ma5 = c_weekly.rolling(window=5).mean().iloc[-1]
+        w_ma10 = c_weekly.rolling(window=10).mean().iloc[-1]
+        w_ma20 = c_weekly.rolling(window=20).mean().iloc[-1]
+        w_tangle = (max(w_ma5, w_ma10, w_ma20) - min(w_ma5, w_ma10, w_ma20)) / w_ma20
+        
+        close_today = c_daily.iloc[-1]
+        
+        # 三週期同時糾結，且股價站上日20MA之上防守
+        if m60_tangle < 0.025 and d_tangle < 0.03 and w_tangle < 0.035 and close_today > d_ma20:
             return True
     except Exception:
         pass
@@ -151,38 +186,44 @@ if __name__ == "__main__":
 
     print("🚀 啟動【台股盤後多策略篩選報告】...")
     
-    # 獲取篩選後的台股核心標的名單
     tech_scan_pool = fetch_all_taiwan_market_tickers()
     
     strat1_matches = []
     strat2_matches = []
+    strat3_matches = []
 
     print(f"⏳ 正在進行台股技術面安全分批掃描 (共 {len(tech_scan_pool)} 檔)...")
     for idx, ticker in enumerate(tech_scan_pool, 1):
-        # 每 15 檔稍微隨機暫停，避免頻率過高被 API 擋 IP
         if idx % 15 == 0: 
             time.sleep(random.uniform(2.0, 3.5))
             
         name_zh = DYNAMIC_STOCK_NAMES.get(ticker, "")
         stock_label = f"<code>{ticker}</code>(<i>{name_zh}</i>)" if name_zh else f"<code>{ticker}</code>"
 
-        # 檢測策略一：多週期三頻共振
+        # 檢測策略一：原版多週期三頻共振
         if check_technical_resonance(ticker):
             strat1_matches.append(stock_label)
             
-        # 檢測策略二：日 K 均線糾結 (5MA/10MA/20MA)
+        # 檢測策略二：日 K 均線糾結
         if check_ma_tangling(ticker):
             strat2_matches.append(stock_label)
+            
+        # 檢測策略三：60分K/日K/週K 全週期同步糾結
+        if check_multi_timeframe_tangling(ticker):
+            strat3_matches.append(stock_label)
 
-    # 📝 建立精簡版台股獨立美化訊息 (全 HTML 語法)
+    # 📝 建立獨立美化訊息 (全 HTML 語法)
     tw_msg = f"🇹🇼 <b>【台股市場：多策略選股報告】</b>\n⏰ 報告時間: {tw_time_str}\n"
     tw_msg += "───────────────────\n\n"
     
-    tw_msg += "📈 <b>【策略一】原版多週期三頻共振</b>\n"
+    tw_msg += "📈 <b>【策略一】原版多週期三頻共振 (MACD)</b>\n"
     tw_msg += "↳ " + (", ".join(strat1_matches) if strat1_matches else "今日無符合標的。 💤") + "\n\n"
 
-    tw_msg += "🌀 <b>【策略二】日K短期均線糾結 (5MA/10MA/20MA)</b>\n"
-    tw_msg += "↳ " + (", ".join(strat2_matches) if strat2_matches else "今日無符合標的。 💤") + "\n"
+    tw_msg += "🌀 <b>【策略二】日K短期均線糾結 (5/10/20MA)</b>\n"
+    tw_msg += "↳ " + (", ".join(strat2_matches) if strat2_matches else "今日無符合標的。 💤") + "\n\n"
+
+    tw_msg += "💎 <b>【策略三】時/日/週 全週期同步糾結 (變盤極品)</b>\n"
+    tw_msg += "↳ " + (", ".join(strat3_matches) if strat3_matches else "今日無符合標的。 💤") + "\n"
 
     # 發送 Telegram
     send_telegram_message(tw_msg)
