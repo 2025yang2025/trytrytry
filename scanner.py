@@ -114,9 +114,9 @@ def check_ma_tangling(ticker):
         # 0.03 代表均線在 3% 寬度內，算非常糾結
         tangle_ratio = (max_ma - min_ma) / ma20
         
-        # 條件 1: 均線糾結度小於 3%
+        # 條件 1: 均線糾結度小於 2%
         # 條件 2: 今日價格在 20MA 之上（代表偏多整理或準備向上突破）
-        if tangle_ratio < 0.03 and close_today > ma20:
+        if tangle_ratio < 0.02 and close_today > ma20:
             return True
     except Exception:
         pass
