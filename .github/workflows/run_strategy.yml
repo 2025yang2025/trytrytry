@@ -1,4 +1,4 @@
-name: Auto Stock Scanner
+name: Auto Stock beta version
 
 on:
   schedule:
