@@ -20,8 +20,7 @@ def fetch_all_taiwan_market_tickers():
             for item in res.json():
                 code = item.get("Code", "").strip()
                 name = item.get("Name", "").strip()
-                # 過濾出 4 位數純數字的個股，並優先聚焦電子與核心製造業板塊（開頭為 23,24,30,32,34,35,36,37,61,62,64,80）
-                # 這樣既能涵蓋台股主流波動標的，又能防止直接掃描 1000 多檔導致 IP 被 yfinance 封鎖
+                # 聚焦電子與核心製造業板塊，防範 yfinance 阻擋 IP
                 if code.isdigit() and len(code) == 4:
                     if code.startswith(('23', '24', '30', '32', '34', '35', '36', '37', '61', '62', '64', '80')):
                         ticker_id = f"{code}.TW"
@@ -54,6 +53,9 @@ def extract_close_series(df):
     return pd.Series(dtype=float)
 
 def check_technical_resonance(ticker):
+    """
+    策略一：原版多週期三頻共振
+    """
     try:
         df_60m = yf.download(ticker, period="1mo", interval="60m", progress=False)
         df_daily = yf.download(ticker, period="1y", interval="1d", progress=False)
@@ -87,6 +89,39 @@ def check_technical_resonance(ticker):
         pass
     return False
 
+def check_ma_tangling(ticker):
+    """
+    策略二：日K層級 5MA, 10MA, 20MA 均線糾結
+    """
+    try:
+        # 只需要獲取日K線數據
+        df_daily = yf.download(ticker, period="3mo", interval="1d", progress=False)
+        c_daily = extract_close_series(df_daily)
+        
+        if c_daily.empty or len(c_daily) < 20: return False
+        
+        # 計算 5, 10, 20 日均線
+        ma5 = c_daily.rolling(window=5).mean().iloc[-1]
+        ma10 = c_daily.rolling(window=10).mean().iloc[-1]
+        ma20 = c_daily.rolling(window=20).mean().iloc[-1]
+        close_today = c_daily.iloc[-1]
+        
+        # 找出三條線的最高與最低值
+        max_ma = max(ma5, ma10, ma20)
+        min_ma = min(ma5, ma10, ma20)
+        
+        # 計算糾結區間帶（最大與最小均線差值佔 20MA 的比例）
+        # 0.03 代表均線在 3% 寬度內，算非常糾結
+        tangle_ratio = (max_ma - min_ma) / ma20
+        
+        # 條件 1: 均線糾結度小於 3%
+        # 條件 2: 今日價格在 20MA 之上（代表偏多整理或準備向上突破）
+        if tangle_ratio < 0.03 and close_today > ma20:
+            return True
+    except Exception:
+        pass
+    return False
+
 # ==============================================================================
 # 💬 Telegram 發送 (全 HTML 解析模式)
 # ==============================================================================
@@ -108,18 +143,19 @@ def send_telegram_message(message):
         print(f"❌ Telegram 發送異常: {e}")
 
 # ==============================================================================
-# 🚀 主程式（台股多週期三頻共振專用版）
+# 🚀 主程式（台股多策略選股專用版）
 # ==============================================================================
 if __name__ == "__main__":
     now_tw = pd.Timestamp.now(tz='UTC').tz_convert('Asia/Taipei')
     tw_time_str = now_tw.strftime('%Y-%m-%d %H:%M:%S')
 
-    print("🚀 啟動【台股多週期三頻共振】盤後策略報告...")
+    print("🚀 啟動【台股盤後多策略篩選報告】...")
     
-    # 1. 獲取篩選後的台股核心標的名單
+    # 獲取篩選後的台股核心標的名單
     tech_scan_pool = fetch_all_taiwan_market_tickers()
     
     strat1_matches = []
+    strat2_matches = []
 
     print(f"⏳ 正在進行台股技術面安全分批掃描 (共 {len(tech_scan_pool)} 檔)...")
     for idx, ticker in enumerate(tech_scan_pool, 1):
@@ -127,21 +163,27 @@ if __name__ == "__main__":
         if idx % 15 == 0: 
             time.sleep(random.uniform(2.0, 3.5))
             
-        # 進行多週期技術面共振檢測
+        name_zh = DYNAMIC_STOCK_NAMES.get(ticker, "")
+        stock_label = f"<code>{ticker}</code>(<i>{name_zh}</i>)" if name_zh else f"<code>{ticker}</code>"
+
+        # 檢測策略一：多週期三頻共振
         if check_technical_resonance(ticker):
-            name_zh = DYNAMIC_STOCK_NAMES.get(ticker, "")
-            stock_label = f"<code>{ticker}</code>(<i>{name_zh}</i>)" if name_zh else f"<code>{ticker}</code>"
-            
-            # 策略一：多週期三頻共振符合
             strat1_matches.append(stock_label)
+            
+        # 檢測策略二：日 K 均線糾結 (5MA/10MA/20MA)
+        if check_ma_tangling(ticker):
+            strat2_matches.append(stock_label)
 
     # 📝 建立精簡版台股獨立美化訊息 (全 HTML 語法)
-    tw_msg = f"🇹🇼 <b>【台股市場：多週期技術面共振報告】</b>\n⏰ 報告時間: {tw_time_str}\n"
-    tw_msg += "───────────────────\n"
+    tw_msg = f"🇹🇼 <b>【台股市場：多策略選股報告】</b>\n⏰ 報告時間: {tw_time_str}\n"
+    tw_msg += "───────────────────\n\n"
     
-    tw_msg += "📈 <b>原版多週期三頻共振符合標的</b>\n"
-    tw_msg += "↳ " + (", ".join(strat1_matches) if strat1_matches else "今日無符合標的。 💤") + "\n"
+    tw_msg += "📈 <b>【策略一】原版多週期三頻共振</b>\n"
+    tw_msg += "↳ " + (", ".join(strat1_matches) if strat1_matches else "今日無符合標的。 💤") + "\n\n"
+
+    tw_msg += "🌀 <b>【策略二】日K短期均線糾結 (5MA/10MA/20MA)</b>\n"
+    tw_msg += "↳ " + (", ".join(strat2_matches) if strat2_matches else "今日無符合標的。 💤") + "\n"
 
     # 發送 Telegram
     send_telegram_message(tw_msg)
-    print("✅ 台股獨立報告發送完畢！")
+    print("✅ 台股多策略報告發送完畢！")
