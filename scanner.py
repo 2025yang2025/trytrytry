@@ -173,6 +173,36 @@ def check_extreme_drop_volume_up(df_daily):
         pass
     return False
 
+def check_strat5_tangling_ordered(df_60m, df_daily, df_weekly):
+    """ 策略五：同步均線糾結 × 順序排列 (60K在上、日K在中、週K在下) """
+    try:
+        c_60m = df_60m['Close'].squeeze().astype(float)
+        c_daily = df_daily['Close'].squeeze().astype(float)
+        c_weekly = df_weekly['Close'].squeeze().astype(float)
+        
+        if len(c_60m) < 20 or len(c_daily) < 20 or len(c_weekly) < 20: return False
+        
+        # 1. 均線糾結度篩選 (沿用策略三指標)
+        m60_tangle = (max(c_60m.rolling(5).mean().iloc[-1], c_60m.rolling(10).mean().iloc[-1], c_60m.rolling(20).mean().iloc[-1]) - min(c_60m.rolling(5).mean().iloc[-1], c_60m.rolling(10).mean().iloc[-1], c_60m.rolling(20).mean().iloc[-1])) / c_60m.rolling(20).mean().iloc[-1]
+        d_tangle = (max(c_daily.rolling(5).mean().iloc[-1], c_daily.rolling(10).mean().iloc[-1], c_daily.rolling(20).mean().iloc[-1]) - min(c_daily.rolling(5).mean().iloc[-1], c_daily.rolling(10).mean().iloc[-1], c_daily.rolling(20).mean().iloc[-1])) / c_daily.rolling(20).mean().iloc[-1]
+        w_tangle = (max(c_weekly.rolling(5).mean().iloc[-1], c_weekly.rolling(10).mean().iloc[-1], c_weekly.rolling(20).mean().iloc[-1]) - min(c_weekly.rolling(5).mean().iloc[-1], c_weekly.rolling(10).mean().iloc[-1], c_weekly.rolling(20).mean().iloc[-1])) / c_weekly.rolling(20).mean().iloc[-1]
+        
+        base_tangle_cond = (m60_tangle < 0.025 and d_tangle < 0.03 and w_tangle < 0.035 and c_daily.iloc[-1] > c_daily.rolling(20).mean().iloc[-1])
+        
+        if not base_tangle_cond: return False
+        
+        # 2. 核心進化條件：多週期順序排列 (60分K最新價 > 日K最新價 > 週K最新價)
+        val_60m = float(c_60m.iloc[-1])
+        val_daily = float(c_daily.iloc[-1])
+        val_weekly = float(c_weekly.iloc[-1])
+        
+        if val_60m > val_daily and val_daily > val_weekly:
+            return True
+            
+    except Exception:
+        pass
+    return False
+
 # ==============================================================================
 # 💬 Telegram 發送
 # ==============================================================================
@@ -200,7 +230,7 @@ if __name__ == "__main__":
     now_tw = pd.Timestamp.now(tz='UTC').tz_convert('Asia/Taipei')
     tw_time_str = now_tw.strftime('%Y-%m-%d %H:%M:%S')
 
-    print("🚀 啟動【台股盤後 4 大策略綜合篩選報告 (高效批次優化版)】...")
+    print("🚀 啟動【台股盤後 5 大策略綜合篩選報告 (高效批次優化版)】...")
     tech_scan_pool = fetch_all_taiwan_market_tickers()
     
     if not tech_scan_pool:
@@ -230,7 +260,7 @@ if __name__ == "__main__":
 
     print(f"🎯 通過量能防線股票共 {len(qualified_tickers)} 檔。")
     
-    strat1_matches, strat2_matches, strat3_matches, strat4_matches = [], [], [], []
+    strat1_matches, strat2_matches, strat3_matches, strat4_matches, strat5_matches = [], [], [], [], []
 
     if qualified_tickers:
         print("⏳ 步驟 2: 批次下載精選股票的 60分K 與 週K 資料...")
@@ -265,6 +295,8 @@ if __name__ == "__main__":
                     strat3_matches.append(stock_label)
                 if check_extreme_drop_volume_up(df_d):
                     strat4_matches.append(stock_label)
+                if check_strat5_tangling_ordered(df_m60, df_d, df_w):
+                    strat5_matches.append(stock_label)
 
             except Exception:
                 pass
@@ -279,11 +311,14 @@ if __name__ == "__main__":
     tw_msg += "📉 <b>【策略二】季線跌深負乖離 × KD金叉 (中線反彈)</b>\n"
     tw_msg += "↳ " + (", ".join(strat2_matches) if strat2_matches else "今日無符合標的。 💤") + "\n\n"
 
-    tw_msg += "💎 <b>【策略三】時/日/週 全週期同步糾結 (變盤極品)</b>\n"
-    tw_msg += "↳ " + (", ".join(strat3_matches) if strat3_matches else "今日無符合標的。 💤") + "\n\n"
+    tw_msg += "💎 <b>【策略三】時/日/週 全週期同步糾結 (不限排列)</b>\n"
+    tw_msg += "↳ " + (", ".join(strat3_matches) if strat3_matches else "今日無符合標的. 💤") + "\n\n"
 
     tw_msg += "🔥 <b>【策略四】短線極限超賣 × 爆量紅K (恐慌止跌)</b>\n"
-    tw_msg += "↳ " + (", ".join(strat4_matches) if strat4_matches else "今日無符合標的。 💤") + "\n"
+    tw_msg += "↳ " + (", ".join(strat4_matches) if strat4_matches else "今日無符合標的。 💤") + "\n\n"
+
+    tw_msg += "🚀 <b>【策略五】同步均線糾結 × 多頭順序排列 (60K＞日K＞週K)</b>\n"
+    tw_msg += "↳ " + (", ".join(strat5_matches) if strat5_matches else "今日無符合標的。 💤") + "\n"
 
     send_telegram_message(tw_msg)
     print("✅ 台股多策略報告發送完畢！")
