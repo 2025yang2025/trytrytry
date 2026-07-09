@@ -21,6 +21,7 @@ def fetch_all_taiwan_market_tickers():
                 code = item.get("Code", "").strip()
                 name = item.get("Name", "").strip()
                 if code.isdigit() and len(code) == 4:
+                    # 篩選半導體、AI硬體、電子權值與關鍵零組件鏈
                     if code.startswith(('23', '24', '30', '32', '34', '35', '36', '37', '61', '62', '64', '80')):
                         ticker_id = f"{code}.TW"
                         all_tickers.append(ticker_id)
@@ -42,10 +43,13 @@ def calculate_macd(close_series, fast=12, slow=26, signal=9):
     hist = macd_line - signal_line
     return macd_line, signal_line, hist
 
-def calculate_kd(df, n=9, m1=3, m2=3):
-    low_min = df['Low'].rolling(window=n).min()
-    high_max = df['High'].rolling(window=n).max()
-    rsv = ((df['Close'] - low_min) / (high_max - low_min)) * 100
+def calculate_kd(df_single, n=9, m1=3, m2=3):
+    """ 傳入單一股票的 DataFrame (單層欄位索引) """
+    low_min = df_single['Low'].astype(float).rolling(window=n).min()
+    high_max = df_single['High'].astype(float).rolling(window=n).max()
+    close = df_single['Close'].astype(float)
+    
+    rsv = ((close - low_min) / (high_max - low_min)) * 100
     rsv = rsv.fillna(50)
     
     k_list, d_list = [50.0], [50.0]
@@ -55,7 +59,7 @@ def calculate_kd(df, n=9, m1=3, m2=3):
         k_list.append(current_k)
         d_list.append(current_d)
         
-    return pd.Series(k_list, index=df.index), pd.Series(d_list, index=df.index)
+    return pd.Series(k_list, index=df_single.index), pd.Series(d_list, index=df_single.index)
 
 def calculate_rsi(close_series, period=6):
     delta = close_series.diff()
@@ -65,52 +69,20 @@ def calculate_rsi(close_series, period=6):
     rsi = 100 - (100 / (1 + rs))
     return rsi.fillna(50)
 
-def extract_close_series(df):
-    if df.empty: return pd.Series(dtype=float)
-    if isinstance(df.columns, pd.MultiIndex):
-        if 'Close' in df.columns.get_level_values(0): return df.xs('Close', axis=1, level=0).squeeze().astype(float)
-    for col in df.columns:
-        if str(col).strip().lower() == 'close': return df[col].squeeze().astype(float)
-    return pd.Series(dtype=float)
-
-def extract_column_series(df, col_name):
-    if df.empty: return pd.Series(dtype=float)
-    if isinstance(df.columns, pd.MultiIndex):
-        if col_name in df.columns.get_level_values(0): return df.xs(col_name, axis=1, level=0).squeeze().astype(float)
-    for col in df.columns:
-        if str(col).strip().lower() == col_name.lower(): return df[col].squeeze().astype(float)
-    return pd.Series(dtype=float)
-
-def check_volume_filter(df_daily, min_volume=500):
-    """ 安全檢查 20日平均成交量 是否大於設定張數 (yfinance 預設是股數，需除以 1000 換算成張數) """
-    try:
-        v_daily = extract_column_series(df_daily, 'Volume')
-        if len(v_daily) < 20: return False
-        v_ma20_shares = v_daily.rolling(window=20).mean().iloc[-1]
-        v_ma20_sheets = v_ma20_shares / 1000
-        return v_ma20_sheets >= min_volume
-    except:
-        return False
-
 # ==============================================================================
-# 🎯 核心策略檢測邏輯 (皆全面導入量能過濾)
+# 🎯 核心策略檢測邏輯
 # ==============================================================================
-def check_technical_resonance(ticker):
-    """ 策略一：原版多週期三頻共振 (MACD) + 量能過濾 """
+
+def check_strat1_resonance(df_60m, df_daily, df_weekly):
+    """ 策略一：原版多週期三頻共振 (MACD) + KD低檔金叉 """
     try:
-        df_daily = yf.download(ticker, period="1y", interval="1d", progress=False)
-        # 1. 優先進行量能防線檢查
-        if not check_volume_filter(df_daily, min_volume=500): return False
-        
-        df_60m = yf.download(ticker, period="1mo", interval="60m", progress=False)
-        df_weekly = yf.download(ticker, period="2y", interval="1wk", progress=False)
-        
-        c_60m = extract_close_series(df_60m)
-        c_daily = extract_close_series(df_daily)
-        c_weekly = extract_close_series(df_weekly)
+        c_60m = df_60m['Close'].squeeze().astype(float)
+        c_daily = df_daily['Close'].squeeze().astype(float)
+        c_weekly = df_weekly['Close'].squeeze().astype(float)
         
         if c_60m.empty or c_daily.empty or c_weekly.empty: return False
 
+        # 1. MACD 條件計算
         w_macd, w_signal, w_hist = calculate_macd(c_weekly)
         d_macd, d_signal, d_hist = calculate_macd(c_daily)
         d_ma = c_daily.rolling(window=20).mean()
@@ -122,24 +94,32 @@ def check_technical_resonance(ticker):
         d_m, d_s, d_c, d_ma_val = float(d_macd.iloc[-1]), float(d_signal.iloc[-1]), float(c_daily.iloc[-1]), float(d_ma.iloc[-1])
         m60_m, m60_h, m60_h_prev = float(m60_macd.iloc[-1]), float(m60_hist.iloc[-1]), float(m60_hist.iloc[-2])
 
-        if (w_m > w_s) and (w_h > 0) and (d_m > 0) and (d_m > d_s) and (d_c > d_ma_val) and (m60_m > 0) and (m60_h > 0) and (m60_h_prev <= 0):
+        macd_cond = (w_m > w_s) and (w_h > 0) and (d_m > 0) and (d_m > d_s) and (d_c > d_ma_val) and (m60_m > 0) and (m60_h > 0) and (m60_h_prev <= 0)
+        
+        if not macd_cond: return False
+
+        # 2. KD 條件計算 (低檔 35 以下金叉)
+        k_60m, d_60m = calculate_kd(df_60m)
+        k_daily, d_daily = calculate_kd(df_daily)
+        k_weekly, d_weekly = calculate_kd(df_weekly)
+        
+        def is_low_kd_gold(k_ser, d_ser, threshold=35):
+            if len(k_ser) < 2: return False
+            cross_up = (k_ser.iloc[-1] > d_ser.iloc[-1]) and (k_ser.iloc[-2] <= d_ser.iloc[-2])
+            is_low = (k_ser.iloc[-1] <= threshold) or (d_ser.iloc[-1] <= threshold)
+            return cross_up and is_low
+
+        if is_low_kd_gold(k_60m, d_60m) and is_low_kd_gold(k_daily, d_daily) and is_low_kd_gold(k_weekly, d_weekly):
             return True
     except Exception:
         pass
     return False
 
-def check_oversold_rebound(ticker):
-    """ 策略二：季線跌深負乖離 × KD金叉 + 量能過濾 """
+def check_oversold_rebound(df_daily):
+    """ 策略二：季線跌深負乖離 × KD金叉 """
     try:
-        df_daily = yf.download(ticker, period="6mo", interval="1d", progress=False)
         if df_daily.empty or len(df_daily) < 60: return False
         
-        # 1. 優先進行量能防線檢查
-        if not check_volume_filter(df_daily, min_volume=500): return False
-        
-        if isinstance(df_daily.columns, pd.MultiIndex):
-            df_daily.columns = [col[0] for col in df_daily.columns]
-            
         c_daily = df_daily['Close'].squeeze().astype(float)
         ma60 = c_daily.rolling(window=60).mean().iloc[-1]
         close_today = c_daily.iloc[-1]
@@ -153,19 +133,12 @@ def check_oversold_rebound(ticker):
         pass
     return False
 
-def check_multi_timeframe_tangling(ticker):
-    """ 策略三：60分K/日K/週K同步均線糾結 + 量能過濾 """
+def check_multi_timeframe_tangling(df_60m, df_daily, df_weekly):
+    """ 策略三：60分K/日K/週K同步均線糾結 """
     try:
-        df_daily = yf.download(ticker, period="3mo", interval="1d", progress=False)
-        # 1. 優先進行量能防線檢查
-        if not check_volume_filter(df_daily, min_volume=500): return False
-        
-        df_60m = yf.download(ticker, period="1mo", interval="60m", progress=False)
-        df_weekly = yf.download(ticker, period="1y", interval="1wk", progress=False)
-        
-        c_60m = extract_close_series(df_60m)
-        c_daily = extract_close_series(df_daily)
-        c_weekly = extract_close_series(df_weekly)
+        c_60m = df_60m['Close'].squeeze().astype(float)
+        c_daily = df_daily['Close'].squeeze().astype(float)
+        c_weekly = df_weekly['Close'].squeeze().astype(float)
         
         if len(c_60m) < 20 or len(c_daily) < 20 or len(c_weekly) < 20: return False
         
@@ -179,18 +152,14 @@ def check_multi_timeframe_tangling(ticker):
         pass
     return False
 
-def check_extreme_drop_volume_up(ticker):
-    """ 策略四：短線極限超賣 × 爆量紅K + 量能過濾 """
+def check_extreme_drop_volume_up(df_daily):
+    """ 策略四：短線極限超賣 × 爆量紅K """
     try:
-        df_daily = yf.download(ticker, period="3mo", interval="1d", progress=False)
         if df_daily.empty or len(df_daily) < 20: return False
         
-        # 1. 優先進行量能防線檢查
-        if not check_volume_filter(df_daily, min_volume=500): return False
-        
-        c_daily = extract_column_series(df_daily, 'Close')
-        o_daily = extract_column_series(df_daily, 'Open')
-        v_daily = extract_column_series(df_daily, 'Volume')
+        c_daily = df_daily['Close'].squeeze().astype(float)
+        o_daily = df_daily['Open'].squeeze().astype(float)
+        v_daily = df_daily['Volume'].squeeze().astype(float)
         
         rsi6 = calculate_rsi(c_daily, period=6).iloc[-1]
         close_today = c_daily.iloc[-1]
@@ -225,39 +194,86 @@ def send_telegram_message(message):
         print(f"❌ Telegram 發送異常: {e}")
 
 # ==============================================================================
-# 🚀 主程式
+# 🚀 主程式 (高效批次優化版)
 # ==============================================================================
 if __name__ == "__main__":
     now_tw = pd.Timestamp.now(tz='UTC').tz_convert('Asia/Taipei')
     tw_time_str = now_tw.strftime('%Y-%m-%d %H:%M:%S')
 
-    print("🚀 啟動【台股盤後 4 大策略綜合篩選報告（已含500張量能過濾）】...")
+    print("🚀 啟動【台股盤後 4 大策略綜合篩選報告 (高效批次優化版)】...")
     tech_scan_pool = fetch_all_taiwan_market_tickers()
+    
+    if not tech_scan_pool:
+        print("❌ 未能取得任何股票代碼，程式結束。")
+        exit()
+
+    print(f"⏳ 步驟 1: 批次下載全市場日K資料進行量能過濾 (共 {len(tech_scan_pool)} 檔)...")
+    # 一次性下載所有候選股的 1 年日K
+    full_df_daily = yf.download(tech_scan_pool, period="1y", interval="1d", progress=False, auto_adjust=True)
+    
+    # 篩選出 20 日均量 >= 500 張的精選名單
+    qualified_tickers = []
+    for ticker in tech_scan_pool:
+        try:
+            # 提取單一股票的 Volume 序列 (相容單檔或多檔 MultiIndex 結構)
+            if len(tech_scan_pool) == 1:
+                v_daily = full_df_daily['Volume'].squeeze()
+            else:
+                v_daily = full_df_daily.xs(ticker, axis=1, level=1)['Volume'].squeeze()
+                
+            if len(v_daily) >= 20:
+                v_ma20_sheets = v_daily.rolling(window=20).mean().iloc[-1] / 1000
+                if v_ma20_sheets >= 500:
+                    qualified_tickers.append(ticker)
+        except Exception:
+            continue
+
+    print(f"🎯 通過量能防線股票共 {len(qualified_tickers)} 檔。")
     
     strat1_matches, strat2_matches, strat3_matches, strat4_matches = [], [], [], []
 
-    print(f"⏳ 正在進行台股技術面安全分批掃描 (共 {len(tech_scan_pool)} 檔)...")
-    for idx, ticker in enumerate(tech_scan_pool, 1):
-        if idx % 15 == 0: 
-            time.sleep(random.uniform(2.0, 3.5))
-            
-        name_zh = DYNAMIC_STOCK_NAMES.get(ticker, "")
-        stock_label = f"<code>{ticker}</code>(<i>{name_zh}</i>)" if name_zh else f"<code>{ticker}</code>"
+    if qualified_tickers:
+        print("⏳ 步驟 2: 批次下載精選股票的 60分K 與 週K 資料...")
+        # 批次下載精選名單的其他週期
+        full_df_60m = yf.download(qualified_tickers, period="1mo", interval="60m", progress=False, auto_adjust=True)
+        full_df_weekly = yf.download(qualified_tickers, period="2y", interval="1wk", progress=False, auto_adjust=True)
 
-        if check_technical_resonance(ticker):
-            strat1_matches.append(stock_label)
-        if check_oversold_rebound(ticker):
-            strat2_matches.append(stock_label)
-        if check_multi_timeframe_tangling(ticker):
-            strat3_matches.append(stock_label)
-        if check_extreme_drop_volume_up(ticker):
-            strat4_matches.append(stock_label)
+        print("⏳ 步驟 3: 記憶體內高速策略流檢測中...")
+        for ticker in qualified_tickers:
+            try:
+                # 安全解包單檔股票各週期的數據
+                if len(qualified_tickers) == 1:
+                    df_d = full_df_daily.copy()
+                    df_m60 = full_df_60m.copy()
+                    df_w = full_df_weekly.copy()
+                else:
+                    df_d = full_df_daily.xs(ticker, axis=1, level=1)
+                    df_m60 = full_df_60m.xs(ticker, axis=1, level=1)
+                    df_w = full_df_weekly.xs(ticker, axis=1, level=1)
+
+                if df_d.empty or df_m60.empty or df_w.empty: continue
+
+                name_zh = DYNAMIC_STOCK_NAMES.get(ticker, "")
+                stock_label = f"<code>{ticker}</code>(<i>{name_zh}</i>)" if name_zh else f"<code>{ticker}</code>"
+
+                # 獨立分流檢測各策略
+                if check_strat1_resonance(df_m60, df_d, df_w):
+                    strat1_matches.append(stock_label)
+                if check_oversold_rebound(df_d):
+                    strat2_matches.append(stock_label)
+                if check_multi_timeframe_tangling(df_m60, df_d, df_w):
+                    strat3_matches.append(stock_label)
+                if check_extreme_drop_volume_up(df_d):
+                    strat4_matches.append(stock_label)
+
+            except Exception:
+                pass
 
     # 📝 建立獨立美化訊息
     tw_msg = f"🇹🇼 <b>【台股多策略選股報告】</b>\n⚠️ <i>已過濾 20日均量 &lt; 500張之殭屍股</i>\n⏰ 時間: {tw_time_str}\n"
     tw_msg += "───────────────────\n\n"
     
-    tw_msg += "📈 <b>【策略一】原版多週期三頻共振 (MACD)</b>\n"
+    tw_msg += "📈 <b>【策略一】原版多週期三頻共振 (MACD + KD 低檔金叉)</b>\n"
     tw_msg += "↳ " + (", ".join(strat1_matches) if strat1_matches else "今日無符合標的。 💤") + "\n\n"
 
     tw_msg += "📉 <b>【策略二】季線跌深負乖離 × KD金叉 (中線反彈)</b>\n"
