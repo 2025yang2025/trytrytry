@@ -43,6 +43,22 @@ def calculate_macd(close_series, fast=12, slow=26, signal=9):
     hist = macd_line - signal_line
     return macd_line, signal_line, hist
 
+def calculate_kd(df, n=9, m1=3, m2=3):
+    """ 計算日K的RSV與KD值 """
+    low_min = df['Low'].rolling(window=n).min()
+    high_max = df['High'].rolling(window=n).max()
+    rsv = ((df['Close'] - low_min) / (high_max - low_min)) * 100
+    rsv = rsv.fillna(50)
+    
+    k_list, d_list = [50.0], [50.0]
+    for i in range(1, len(rsv)):
+        current_k = (k_list[-1] * (m1 - 1) + rsv.iloc[i]) / m1
+        current_d = (d_list[-1] * (m2 - 1) + current_k) / m2
+        k_list.append(current_k)
+        d_list.append(current_d)
+        
+    return pd.Series(k_list, index=df.index), pd.Series(d_list, index=df.index)
+
 def extract_close_series(df):
     if df.empty: return pd.Series(dtype=float)
     if isinstance(df.columns, pd.MultiIndex):
@@ -89,37 +105,46 @@ def check_technical_resonance(ticker):
         pass
     return False
 
-def check_ma_tangling(ticker):
+def check_oversold_rebound(ticker):
     """
-    策略二：日K層級 5MA, 10MA, 20MA 均線糾結
+    新策略二：日K 季線跌深負乖離 + 低檔 KD 黃金交叉
     """
     try:
-        df_daily = yf.download(ticker, period="3mo", interval="1d", progress=False)
-        c_daily = extract_close_series(df_daily)
+        # 下載半年的日K數據以精確計算 60MA (季線) 與 KD
+        df_daily = yf.download(ticker, period="6mo", interval="1d", progress=False)
+        if df_daily.empty or len(df_daily) < 60: return False
         
-        if c_daily.empty or len(c_daily) < 20: return False
+        # 由於 KD 計算需要 High/Low/Close，先進行多重索引平坦化處理
+        if isinstance(df_daily.columns, pd.MultiIndex):
+            df_daily.columns = [col[0] for col in df_daily.columns]
+            
+        c_daily = df_daily['Close'].squeeze().astype(float)
         
-        ma5 = c_daily.rolling(window=5).mean().iloc[-1]
-        ma10 = c_daily.rolling(window=10).mean().iloc[-1]
-        ma20 = c_daily.rolling(window=20).mean().iloc[-1]
+        # 1. 計算季線負乖離率
+        ma60 = c_daily.rolling(window=60).mean().iloc[-1]
         close_today = c_daily.iloc[-1]
+        bias_60 = (close_today - ma60) / ma60
         
-        max_ma = max(ma5, ma10, ma20)
-        min_ma = min(ma5, ma10, ma20)
-        tangle_ratio = (max_ma - min_ma) / ma20
+        # 2. 計算日K低檔 KD 黃金交叉
+        k_series, d_series = calculate_kd(df_daily)
+        k_today, d_today = k_series.iloc[-1], d_series.iloc[-1]
+        k_yesterday, d_yesterday = k_series.iloc[-2], d_series.iloc[-2]
         
-        if tangle_ratio < 0.03 and close_today > ma20:
-            return True
+        # 條件 1: 負乖離大於 15% (即相較季線跌幅超過 15%)
+        # 條件 2: KD 位於 25 以下超賣區
+        # 條件 3: 今日 KD 黃金交叉 (今日 K 衝過 D，昨日 K 在 D 之下或相等)
+        if bias_60 <= -0.15 and k_today < 25 and d_today < 25:
+            if k_today > d_today and k_yesterday <= d_yesterday:
+                return True
     except Exception:
         pass
     return False
 
 def check_multi_timeframe_tangling(ticker):
     """
-    策略三：60分K、日K、週K同步均線糾結 (三週公共振壓縮)
+    策略三：60分K、日K、週K同步均線糾結
     """
     try:
-        # 一次性下載三個週期需要的數據
         df_60m = yf.download(ticker, period="1mo", interval="60m", progress=False)
         df_daily = yf.download(ticker, period="3mo", interval="1d", progress=False)
         df_weekly = yf.download(ticker, period="1y", interval="1wk", progress=False)
@@ -130,19 +155,16 @@ def check_multi_timeframe_tangling(ticker):
         
         if len(c_60m) < 20 or len(c_daily) < 20 or len(c_weekly) < 20: return False
         
-        # 1. 60分K 糾結度計算
         m60_ma5 = c_60m.rolling(window=5).mean().iloc[-1]
         m60_ma10 = c_60m.rolling(window=10).mean().iloc[-1]
         m60_ma20 = c_60m.rolling(window=20).mean().iloc[-1]
         m60_tangle = (max(m60_ma5, m60_ma10, m60_ma20) - min(m60_ma5, m60_ma10, m60_ma20)) / m60_ma20
         
-        # 2. 日K 糾結度計算
         d_ma5 = c_daily.rolling(window=5).mean().iloc[-1]
         d_ma10 = c_daily.rolling(window=10).mean().iloc[-1]
         d_ma20 = c_daily.rolling(window=20).mean().iloc[-1]
         d_tangle = (max(d_ma5, d_ma10, d_ma20) - min(d_ma5, d_ma10, d_ma20)) / d_ma20
         
-        # 3. 週K 糾結度計算
         w_ma5 = c_weekly.rolling(window=5).mean().iloc[-1]
         w_ma10 = c_weekly.rolling(window=10).mean().iloc[-1]
         w_ma20 = c_weekly.rolling(window=20).mean().iloc[-1]
@@ -150,7 +172,6 @@ def check_multi_timeframe_tangling(ticker):
         
         close_today = c_daily.iloc[-1]
         
-        # 三週期同時糾結，且股價站上日20MA之上防守
         if m60_tangle < 0.025 and d_tangle < 0.03 and w_tangle < 0.035 and close_today > d_ma20:
             return True
     except Exception:
@@ -204,8 +225,8 @@ if __name__ == "__main__":
         if check_technical_resonance(ticker):
             strat1_matches.append(stock_label)
             
-        # 檢測策略二：日 K 均線糾結
-        if check_ma_tangling(ticker):
+        # 檢測策略二：日K季線跌深負乖離 + 低檔KD金叉
+        if check_oversold_rebound(ticker):
             strat2_matches.append(stock_label)
             
         # 檢測策略三：60分K/日K/週K 全週期同步糾結
@@ -219,7 +240,7 @@ if __name__ == "__main__":
     tw_msg += "📈 <b>【策略一】原版多週期三頻共振 (MACD)</b>\n"
     tw_msg += "↳ " + (", ".join(strat1_matches) if strat1_matches else "今日無符合標的。 💤") + "\n\n"
 
-    tw_msg += "🌀 <b>【策略二】日K短期均線糾結 (5/10/20MA)</b>\n"
+    tw_msg += "📉 <b>【策略二】季線跌深負乖離 × 低檔KD金叉 (超跌反彈)</b>\n"
     tw_msg += "↳ " + (", ".join(strat2_matches) if strat2_matches else "今日無符合標的。 💤") + "\n\n"
 
     tw_msg += "💎 <b>【策略三】時/日/週 全週期同步糾結 (變盤極品)</b>\n"
