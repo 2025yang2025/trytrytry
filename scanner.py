@@ -10,6 +10,7 @@ import random
 # ==============================================================================
 DYNAMIC_STOCK_NAMES = {}
 FUNDAMENTAL_DATA = {}  # 存放 P/E 和 P/B 資料
+SHARES_OUTSTANDING_DATA = {}  # 存放發行股數資料，用於計算換手率
 
 def fetch_all_taiwan_market_tickers():
     """ 下載全台股市場代碼（不限產業），並同步撈取證交所盤後估值資料 """
@@ -228,6 +229,48 @@ def check_strat6_undervalued(ticker):
         return True, pe, pb
     return False
 
+def check_strat7_low_price_high_turnover(ticker, df_daily):
+    """ 
+    策略七：股價低檔 × 換手率大於10至17% 
+    - 股價低檔：收盤價位於近 120 日(約半年)最高與最低價區間的 30% 以下
+    - 換手率：當日成交張數 / 發行總股數 介於 10% ~ 17% 之間
+    """
+    try:
+        if df_daily.empty or len(df_daily) < 120: return False
+        
+        # 1. 取得發行股數 (使用全域變數快取，若無則透過 yfinance 補撈)
+        shares = SHARES_OUTSTANDING_DATA.get(ticker)
+        if not shares:
+            t = yf.Ticker(ticker)
+            shares = t.info.get("sharesOutstanding")
+            if shares:
+                SHARES_OUTSTANDING_DATA[ticker] = shares
+            else:
+                return False
+        
+        c_daily = df_daily['Close'].squeeze().astype(float)
+        v_daily = df_daily['Volume'].squeeze().astype(float)
+        
+        # 2. 計算股價低檔位置 (0% 代表歷史新低，100% 代表歷史新高)
+        low_120 = c_daily.rolling(window=120).min().iloc[-1]
+        high_120 = c_daily.rolling(window=120).max().iloc[-1]
+        close_today = c_daily.iloc[-1]
+        
+        if high_120 == low_120: return False
+        price_position = (close_today - low_120) / (high_120 - low_120)
+        
+        # 3. 計算今日換手率 (yfinance 的 Volume 為成交股數)
+        volume_today = v_daily.iloc[-1]
+        turnover_rate = (volume_today / shares) * 100
+        
+        # 4. 條件判斷：股價處於低檔 30% 以下，且換手率介於 10% ~ 17%
+        if price_position <= 0.30 and 10.0 <= turnover_rate <= 17.0:
+            return True, price_position * 100, turnover_rate
+            
+    except Exception:
+        pass
+    return False
+
 # ==============================================================================
 # 💬 Telegram 發送
 # ==============================================================================
@@ -255,7 +298,7 @@ if __name__ == "__main__":
     now_tw = pd.Timestamp.now(tz='UTC').tz_convert('Asia/Taipei')
     tw_time_str = now_tw.strftime('%Y-%m-%d %H:%M:%S')
 
-    print("🚀 啟動【台股盤後 6 大策略全市場篩選報告】...")
+    print("🚀 啟動【台股盤後 7 大策略全市場篩選報告】...")
     tech_scan_pool = fetch_all_taiwan_market_tickers()
     
     if not tech_scan_pool:
@@ -284,8 +327,8 @@ if __name__ == "__main__":
 
     print(f"🎯 通過量能防線股票共 {len(qualified_tickers)} 檔。")
     
-    # 初始化 6 大策略匹配清單
-    strat1_matches, strat2_matches, strat3_matches, strat4_matches, strat5_matches, strat6_matches = [], [], [], [], [], []
+    # 初始化 7 大策略匹配清單
+    strat1_matches, strat2_matches, strat3_matches, strat4_matches, strat5_matches, strat6_matches, strat7_matches = [], [], [], [], [], [], []
 
     if qualified_tickers:
         print("⏳ 步驟 2: 批次下載精選股票的 60分K 與 週K 資料...")
@@ -334,13 +377,19 @@ if __name__ == "__main__":
                     _, cur_pe, cur_pb = val_check
                     strat6_matches.append(f"{stock_label}[PE:{cur_pe:.1f}, PB:{cur_pb:.2f}]")
 
+                # 檢測策略七：股價低檔 + 換手率大於10-17%
+                turnover_check = check_strat7_low_price_high_turnover(ticker, df_d)
+                if turnover_check:
+                    _, price_pos, turn_rate = turnover_check
+                    strat7_matches.append(f"{stock_label}[位置:{price_pos:.1f}%, 換手:{turn_rate:.1f}%]")
+
             except KeyError:
                 continue
             except Exception as e:
                 print(f"⚠️ 處理個股 {ticker} 時發生未預期錯誤: {e}")
                 continue
 
-    # 📝 建立 6 大策略綜合美化報告訊息
+    # 📝 建立 7 大策略綜合美化報告訊息
     tw_msg = f"🇹🇼 <b>【台股多策略選股報告】</b>\n⚠️ <i>已過濾 20日均量 &lt; 500張之殭屍股</i>\n⏰ 時間: {tw_time_str}\n"
     tw_msg += "───────────────────\n\n"
     
@@ -354,13 +403,16 @@ if __name__ == "__main__":
     tw_msg += "↳ " + (", ".join(strat3_matches) if strat3_matches else "今日無符合標的。 💤") + "\n\n"
 
     tw_msg += "🔥 <b>【策略四】短線極限超賣 × 爆量紅K (恐慌止跌)</b>\n"
-    tw_msg += "↳ " + (", ".join(strat4_matches) if strat4_matches else "今日無符合標的。 💤") + "\n\n"
+    tw_msg += "↳ " + (", ".join(strat4_matches) if strat4_matches else "今日無符合標的. 💤") + "\n\n"
 
     tw_msg += "🚀 <b>【策略五】同步均線糾結 × 多頭順序排列 (60K＞日K＞週K)</b>\n"
     tw_msg += "↳ " + (", ".join(strat5_matches) if strat5_matches else "今日無符合標的。 💤") + "\n\n"
 
     tw_msg += "💰 <b>【策略六】價值型低估股 (本益比 ≤ 12 × 股價淨值比 ≤ 1.0)</b>\n"
-    tw_msg += "↳ " + (", ".join(strat6_matches) if strat6_matches else "今日無符合標的。 💤") + "\n"
+    tw_msg += "↳ " + (", ".join(strat6_matches) if strat6_matches else "今日無符合標的。 💤") + "\n\n"
+
+    tw_msg += "🔄 <b>【策略七】主力進場換手股 (股價半年低檔區 × 換手率 10% - 17%)</b>\n"
+    tw_msg += "↳ " + (", ".join(strat7_matches) if strat7_matches else "今日無符合標的。 💤") + "\n"
 
     send_telegram_message(tw_msg)
     print("✅ 台股多策略基本面綜合報告發送完畢！")
