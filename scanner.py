@@ -308,7 +308,7 @@ if __name__ == "__main__":
     print(f"⏳ 步驟 1: 批次下載全市場日K資料進行量能過濾 (共 {len(tech_scan_pool)} 檔)...")
     full_df_daily = yf.download(tech_scan_pool, period="1y", interval="1d", progress=False, auto_adjust=True)
     
-    # 篩選出 20 日均量 >= 500 張的精選名單
+    # ─── 【量能防線：20日均量修改為 1,000 張 (1000K 股)】 ───
     qualified_tickers = []
     for ticker in tech_scan_pool:
         try:
@@ -319,13 +319,14 @@ if __name__ == "__main__":
                 v_daily = full_df_daily.xs(ticker, axis=1, level=1)['Volume'].squeeze()
                 
             if len(v_daily) >= 20:
+                # v_daily 的單位是「股」，除以 1000 轉換為「張」
                 v_ma20_sheets = v_daily.rolling(window=20).mean().iloc[-1] / 1000
-                if v_ma20_sheets >= 500:
+                if v_ma20_sheets >= 1000:  # 門檻已由 500 修改為 1000
                     qualified_tickers.append(ticker)
         except Exception:
             continue
 
-    print(f"🎯 通過量能防線股票共 {len(qualified_tickers)} 檔。")
+    print(f"🎯 通過量能防線（20日均量 >= 1000張）股票共 {len(qualified_tickers)} 檔。")
     
     # 初始化 7 大策略匹配清單
     strat1_matches, strat2_matches, strat3_matches, strat4_matches, strat5_matches, strat6_matches, strat7_matches = [], [], [], [], [], [], []
@@ -390,7 +391,7 @@ if __name__ == "__main__":
                 continue
 
     # 📝 建立 7 大策略綜合美化報告訊息
-    tw_msg = f"🇹🇼 <b>【台股多策略選股報告】</b>\n⚠️ <i>已過濾 20日均量 &lt; 500張之殭屍股</i>\n⏰ 時間: {tw_time_str}\n"
+    tw_msg = f"🇹🇼 <b>【台股多策略選股報告】</b>\n⚠️ <i>已過濾 20日均量 &lt; 1000張之殭屍股</i>\n⏰ 時間: {tw_time_str}\n"
     tw_msg += "───────────────────\n\n"
     
     tw_msg += "📈 <b>【策略一】原版多週期三頻共振 (MACD + KD 低檔金叉)</b>\n"
@@ -403,10 +404,10 @@ if __name__ == "__main__":
     tw_msg += "↳ " + (", ".join(strat3_matches) if strat3_matches else "今日無符合標的。 💤") + "\n\n"
 
     tw_msg += "🔥 <b>【策略四】短線極限超賣 × 爆量紅K (恐慌止跌)</b>\n"
-    tw_msg += "↳ " + (", ".join(strat4_matches) if strat4_matches else "今日無符合標的. 💤") + "\n\n"
+    tw_msg += "↳ " + (", ".join(strat4_matches) if strat4_matches else "今日無符合標的。 💤") + "\n\n"
 
     tw_msg += "🚀 <b>【策略五】同步均線糾結 × 多頭順序排列 (60K＞日K＞週K)</b>\n"
-    tw_msg += "↳ " + (", ".join(strat5_matches) if strat5_matches else "今日無符合標的。 💤") + "\n\n"
+    tw_msg += "↳ " + (", ".join(strat5_matches) if strat5_matches else "今日無符合標的. 💤") + "\n\n"
 
     tw_msg += "💰 <b>【策略六】價值型低估股 (本益比 ≤ 12 × 股價淨值比 ≤ 1.0)</b>\n"
     tw_msg += "↳ " + (", ".join(strat6_matches) if strat6_matches else "今日無符合標的。 💤") + "\n\n"
