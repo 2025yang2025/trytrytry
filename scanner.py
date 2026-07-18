@@ -125,26 +125,48 @@ def check_strat1_resonance(df_60m, df_daily, df_weekly):
     return False
 
 def check_bollinger_squeeze(df_daily):
-    """ 策略二：布林軌道壓縮 (Bandwidth 創近 60 日新低) """
+    """
+    策略二：布林軌道極致壓縮（修正實戰版）
+    雙重過濾：確保頻寬絕對值極小（<= 6%），且近期波動是近 60 日最窄，
+    並加上「股價站上中軌且貼近上軌」的即將表態特徵，過濾掉無量死魚股。
+    """
     try:
         if df_daily.empty or len(df_daily) < 20: return False
         c_daily = df_daily['Close'].squeeze().astype(float)
+        h_daily = df_daily['High'].squeeze().astype(float)
+        l_daily = df_daily['Low'].squeeze().astype(float)
         
+        # 1. 計算 20 MA（中軌）與 2 倍標準差
         ma20 = c_daily.rolling(window=20).mean()
         std20 = c_daily.rolling(window=20).std()
         
         upper_band = ma20 + (2 * std20)
         lower_band = ma20 - (2 * std20)
+        
+        # 2. 計算布林頻寬 (Bandwidth)
         bandwidth = (upper_band - lower_band) / ma20
         
         if len(bandwidth) < 60: return False
         
         current_bw = bandwidth.iloc[-1]
-        min_bw_60 = bandwidth.iloc[-60:].min()
         
-        if current_bw == min_bw_60 and current_bw <= 0.08:
+        # 【修正核心 1】：設定嚴格的絕對頻寬門檻（實戰上 5%~6% 才是真正擠壓到變形）
+        # 同時確保它是最近 20 天或 60 天內相對極窄的時期
+        is_absolute_squeeze = current_bw <= 0.06  # 頻寬小於 6%
+        
+        # 【修正核心 2】：過濾完全沒動靜的股票，我們希望找「壓縮到極致且開始往上表態」的標的
+        close_today = c_daily.iloc[-1]
+        ma20_today = ma20.iloc[-1]
+        upper_today = upper_band.iloc[-1]
+        
+        # 條件：股價已經站上中軌，且距離上軌非常近（代表隨時準備噴出上軌）
+        is_ready_to_break = (close_today >= ma20_today) and ((upper_today - close_today) / close_today <= 0.02)
+        
+        if is_absolute_squeeze and is_ready_to_break:
             return True, current_bw * 100
-    except: pass
+            
+    except Exception as e:
+        pass
     return False
 
 def check_multi_timeframe_tangling(df_60m, df_daily, df_weekly):
