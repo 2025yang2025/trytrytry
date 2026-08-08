@@ -75,7 +75,7 @@ def fetch_fast_chips_summary():
         print(f"⚠️ 籌碼快取下載異常: {e}")
 
 # ==============================================================================
-# 📊 技術指標與策略算術模組
+# 📊 技術指標算術模組
 # ==============================================================================
 def calculate_macd(close_series, fast=12, slow=26, signal=9):
     fast_ema = close_series.ewm(span=fast, adjust=False).mean()
@@ -102,33 +102,32 @@ def calculate_rsi(close_series, period=6):
     return (100 - (100 / (1 + (gain / loss)))).fillna(50)
 
 # ==============================================================================
-# 🎯 策略判斷邏輯（新增策略八）
+# 🎯 策略判斷邏輯
 # ==============================================================================
-def check_strat1_resonance(df_60m, df_daily, df_weekly):
-    """ 策略一：多週期三頻共振 """
+def check_strat1_resonance(df_30m, df_60m):
+    """
+    🔄 修改後的策略一：30分與60分K棒 MACD 往0軸往上 + KD黃金交叉
+    """
     try:
+        c_30m = df_30m['Close'].squeeze().astype(float)
         c_60m = df_60m['Close'].squeeze().astype(float)
-        c_daily = df_daily['Close'].squeeze().astype(float)
-        c_weekly = df_weekly['Close'].squeeze().astype(float)
-        
-        w_macd, w_signal, w_hist = calculate_macd(c_weekly)
-        d_macd, d_signal, d_hist = calculate_macd(c_daily)
-        d_ma = c_daily.rolling(window=20).mean()
-        m60_macd, m60_signal, m60_hist = calculate_macd(c_60m)
 
-        macd_cond = (float(w_macd.iloc[-1]) > float(w_signal.iloc[-1])) and (float(w_hist.iloc[-1]) > 0) and \
-                    (float(d_macd.iloc[-1]) > 0) and (float(d_macd.iloc[-1]) > float(d_signal.iloc[-1])) and \
-                    (float(c_daily.iloc[-1]) > float(d_ma.iloc[-1])) and (float(m60_macd.iloc[-1]) > 0) and \
-                    (float(m60_hist.iloc[-1]) > 0) and (float(m60_hist.iloc[-2]) <= 0)
-        if not macd_cond: return False
+        def check_single_tf(df_tf, c_tf):
+            # 1. MACD 判斷：DIF線向上走揚 (當前 > 前1根 >= 前2根) 且 趨向或已在0軸上方
+            macd_line, signal_line, hist = calculate_macd(c_tf)
+            is_macd_up = (macd_line.iloc[-1] > macd_line.iloc[-2]) and (macd_line.iloc[-1] >= macd_line.iloc[-3])
+            # DIF 須位於往 0 軸靠攏的方向（DIF > -0.5 或 柱狀體紅K > 0）
+            is_macd_towards_zero = (macd_line.iloc[-1] >= -0.5) or (hist.iloc[-1] > 0)
 
-        k_60m, d_60m = calculate_kd(df_60m)
-        k_daily, d_daily = calculate_kd(df_daily)
-        
-        def is_low_kd_gold(k_ser, d_ser, threshold=35):
-            return (k_ser.iloc[-1] > d_ser.iloc[-1]) and (k_ser.iloc[-2] <= d_ser.iloc[-2]) and (k_ser.iloc[-1] <= threshold)
+            # 2. KD 黃金交叉判斷 (當前 K > D 且 近2根內發生過交叉)
+            k_ser, d_ser = calculate_kd(df_tf)
+            is_kd_gold = (k_ser.iloc[-1] > d_ser.iloc[-1]) and (k_ser.iloc[-2] <= d_ser.iloc[-2] or k_ser.iloc[-3] <= d_ser.iloc[-3])
 
-        if is_low_kd_gold(k_60m, d_60m) and is_low_kd_gold(k_daily, d_daily): return True
+            return is_macd_up and is_macd_towards_zero and is_kd_gold
+
+        # 30分與60分K棒皆須同時滿足條件
+        if check_single_tf(df_30m, c_30m) and check_single_tf(df_60m, c_60m):
+            return True
     except: pass
     return False
 
@@ -192,9 +191,7 @@ def check_strat7_low_price_high_turnover(ticker, df_daily):
     return False
 
 def check_strat8_two_month_squeeze_breakout(df_daily):
-    """
-    🆕 策略八：雙月極限壓縮突破股 (近2個月震盪介於 10%-15%，今日第一根突破最高點)
-    """
+    """ 策略八：雙月極限壓縮突破股 """
     try:
         if len(df_daily) < 41: return False
         c_daily = df_daily['Close'].squeeze().astype(float)
@@ -202,34 +199,22 @@ def check_strat8_two_month_squeeze_breakout(df_daily):
         l_daily = df_daily['Low'].squeeze().astype(float)
         o_daily = df_daily['Open'].squeeze().astype(float)
 
-        # 1. 取前 1 至前 40 根 K 棒（過去兩個月）的最高價與最低價
         past_40_high = h_daily.iloc[-41:-1].max()
         past_40_low = l_daily.iloc[-41:-1].min()
-
         if past_40_low <= 0: return False
 
-        # 2. 計算過去兩個月的震盪振幅範圍
         squeeze_range = (past_40_high - past_40_low) / past_40_low
-
-        # 條件 A：雙月震盪幅度必須介於 10% 到 15% 之間（極限壓縮）
         is_squeezed = 0.10 <= squeeze_range <= 0.15
 
-        # 3. 當前（今日）K 棒表現
         today_close = c_daily.iloc[-1]
         today_open = o_daily.iloc[-1]
 
-        # 條件 B：今日收盤價創下近 40 日新高（正式突破壓縮高點）
         is_breakout = today_close > past_40_high
-
-        # 條件 C：前一日收盤價還在最高價之下（確保這是「突破第一根」）
         is_first_bar = c_daily.iloc[-2] <= past_40_high
-
-        # 條件 D：今日必須是實體紅 K (收盤價 > 開盤價)
         is_red_k = today_close > today_open
 
         if is_squeezed and is_breakout and is_first_bar and is_red_k:
             return True, squeeze_range * 100
-
     except: pass
     return False
 
@@ -246,7 +231,7 @@ def send_telegram_message(message):
     except Exception as e: print(f"❌ Telegram 發送異常: {e}")
 
 # ==============================================================================
-# 🚀 主程式 (1 ~ 8 全策略整合)
+# 🚀 主程式
 # ==============================================================================
 if __name__ == "__main__":
     start_time = time.time()
@@ -260,7 +245,6 @@ if __name__ == "__main__":
     print(f"⏳ 步驟 1: 打包下載全市場日K資料 (共 {len(tech_scan_pool)} 檔)...")
     full_df_daily = yf.download(tech_scan_pool, period="1y", interval="1d", progress=False, auto_adjust=True)
     
-    # 策略結果清單 (1 ~ 8)
     strat1, strat2, strat3, strat4, strat5, strat6, strat7, strat8 = [], [], [], [], [], [], [], []
     heavy_scan_pool = []
 
@@ -271,7 +255,7 @@ if __name__ == "__main__":
             df_d = full_df_daily.xs(ticker, axis=1, level=1)
             if df_d.empty or len(df_d) < 120: continue 
             
-            # 核心防線：20日均量 >= 1000張
+            # 20日均量 >= 1000張
             if df_d['Volume'].rolling(window=20).mean().iloc[-1] / 1000 < 1000: continue
 
             name_zh = DYNAMIC_STOCK_NAMES.get(ticker, "")
@@ -302,22 +286,28 @@ if __name__ == "__main__":
             if sq_breakout:
                 strat8.append(f"{stock_label}[雙月區間:{sq_breakout[1]:.1f}%]")
 
-            # 精選多週期掃描池
+            # 進入多週期掃描池
             if df_d['Close'].iloc[-1] > df_d['Close'].rolling(20).mean().iloc[-1]:
                 heavy_scan_pool.append(ticker)
 
         except: continue
 
-    # ⏳ 步驟 3: 多週期漏斗深度掃描 (策略一與策略三)
+    # ⏳ 步驟 3: 多週期深度掃描 (30分K、60分K 與 週K)
     final_heavy_pool = heavy_scan_pool[:40]
     if final_heavy_pool:
-        print(f"⏳ 步驟 3: 針對精選的 {len(final_heavy_pool)} 檔標的下載 60分K 與 週K...")
+        print(f"⏳ 步驟 3: 下載精選 {len(final_heavy_pool)} 檔標的的 30分K、60分K 與 週K...")
+        full_df_30m = yf.download(final_heavy_pool, period="1mo", interval="30m", progress=False, auto_adjust=True)
         full_df_60m = yf.download(final_heavy_pool, period="1mo", interval="60m", progress=False, auto_adjust=True)
         full_df_weekly = yf.download(final_heavy_pool, period="2y", interval="1wk", progress=False, auto_adjust=True)
 
         for ticker in final_heavy_pool:
             try:
-                if ticker not in full_df_60m.columns.levels[1] or ticker not in full_df_weekly.columns.levels[1]: continue
+                if (ticker not in full_df_30m.columns.levels[1] or 
+                    ticker not in full_df_60m.columns.levels[1] or 
+                    ticker not in full_df_weekly.columns.levels[1]): 
+                    continue
+                
+                df_m30 = full_df_30m.xs(ticker, axis=1, level=1)
                 df_m60 = full_df_60m.xs(ticker, axis=1, level=1)
                 df_w = full_df_weekly.xs(ticker, axis=1, level=1)
                 df_d = full_df_daily.xs(ticker, axis=1, level=1)
@@ -325,18 +315,20 @@ if __name__ == "__main__":
                 name_zh = DYNAMIC_STOCK_NAMES.get(ticker, "")
                 stock_label = f"<code>{ticker}</code>(<i>{name_zh}</i>)" if name_zh else f"<code>{ticker}</code>"
 
-                # 🛠️ 【策略一：多週期三頻共振】
-                if check_strat1_resonance(df_m60, df_d, df_w): strat1.append(stock_label)
+                # 🛠️ 【策略一：30m/60m MACD往0軸向上 + KD黃金交叉】
+                if check_strat1_resonance(df_m30, df_m60): 
+                    strat1.append(stock_label)
 
                 # 🛠️ 【策略三：全週期同步糾結】
-                if check_multi_timeframe_tangling(df_m60, df_d, df_w): strat3.append(stock_label)
+                if check_multi_timeframe_tangling(df_m60, df_d, df_w): 
+                    strat3.append(stock_label)
             except: continue
 
-    # 📝 建立 Telegram 報告訊息
+    # 📝 Telegram 報告輸出
     tw_msg = f"🇹🇼 <b>【台股多策略選股報告】</b>\n⚠️ <i>已過濾 20日均量 &lt; 1000張之殭屍股</i>\n⏰ 時間: {tw_time_str}\n"
     tw_msg += "───────────────────\n\n"
     
-    tw_msg += "📈 <b>【策略一】原版多週期三頻共振 (MACD + KD 低檔金叉)</b>\n"
+    tw_msg += "📈 <b>【策略一】30分/60分K MACD趨向0軸向上 + KD黃金交叉</b>\n"
     tw_msg += f"↳ {', '.join(strat1) if strat1 else '今日無符合標的。 💤'}\n\n"
 
     tw_msg += "💥 <b>【策略二】布林軌道壓縮 (頻寬極致壓縮 ≤ 6% 臨界面)</b>\n"
