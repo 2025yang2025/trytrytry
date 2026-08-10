@@ -51,7 +51,7 @@ def fetch_all_taiwan_market_tickers():
     return sorted(list(set(all_tickers)))
 
 def fetch_fast_chips_summary():
-    """ 策略五：一次性下載大戶持股總表快取 """
+    """ 策略七：一次性下載大戶持股總表快取 """
     if not FINMIND_TOKEN: return
     url = "https://api.finmindtrade.com/api/v4/data"
     start_date = (pd.Timestamp.now() - pd.Timedelta(days=14)).strftime('%Y-%m-%d')
@@ -102,37 +102,80 @@ def calculate_rsi(close_series, period=6):
     return (100 - (100 / (1 + (gain / loss)))).fillna(50)
 
 # ==============================================================================
-# 🎯 策略判斷邏輯
+# 🎯 策略判斷邏輯（整合策略 1 ~ 10）
 # ==============================================================================
 def check_strat1_resonance(df_30m, df_60m):
-    """
-    🔄 修改後的策略一：30分與60分K棒 MACD 往0軸往上 + KD黃金交叉
-    """
+    """ 策略一：30分與60分K棒 MACD 往0軸向上 + KD黃金交叉 """
     try:
         c_30m = df_30m['Close'].squeeze().astype(float)
         c_60m = df_60m['Close'].squeeze().astype(float)
 
         def check_single_tf(df_tf, c_tf):
-            # 1. MACD 判斷：DIF線向上走揚 (當前 > 前1根 >= 前2根) 且 趨向或已在0軸上方
             macd_line, signal_line, hist = calculate_macd(c_tf)
             is_macd_up = (macd_line.iloc[-1] > macd_line.iloc[-2]) and (macd_line.iloc[-1] >= macd_line.iloc[-3])
-            # DIF 須位於往 0 軸靠攏的方向（DIF > -0.5 或 柱狀體紅K > 0）
             is_macd_towards_zero = (macd_line.iloc[-1] >= -0.5) or (hist.iloc[-1] > 0)
 
-            # 2. KD 黃金交叉判斷 (當前 K > D 且 近2根內發生過交叉)
             k_ser, d_ser = calculate_kd(df_tf)
             is_kd_gold = (k_ser.iloc[-1] > d_ser.iloc[-1]) and (k_ser.iloc[-2] <= d_ser.iloc[-2] or k_ser.iloc[-3] <= d_ser.iloc[-3])
-
             return is_macd_up and is_macd_towards_zero and is_kd_gold
 
-        # 30分與60分K棒皆須同時滿足條件
         if check_single_tf(df_30m, c_30m) and check_single_tf(df_60m, c_60m):
             return True
     except: pass
     return False
 
+def check_strat2_daily_weekly_resonance(df_daily, df_weekly):
+    """
+    🆕 策略二：日K與週K MACD 往0軸向上 + KD黃金交叉
+    """
+    try:
+        c_daily = df_daily['Close'].squeeze().astype(float)
+        c_weekly = df_weekly['Close'].squeeze().astype(float)
+
+        def check_single_tf(df_tf, c_tf):
+            macd_line, signal_line, hist = calculate_macd(c_tf)
+            is_macd_up = (macd_line.iloc[-1] > macd_line.iloc[-2]) and (macd_line.iloc[-1] >= macd_line.iloc[-3])
+            is_macd_towards_zero = (macd_line.iloc[-1] >= -0.5) or (hist.iloc[-1] > 0)
+
+            k_ser, d_ser = calculate_kd(df_tf)
+            is_kd_gold = (k_ser.iloc[-1] > d_ser.iloc[-1]) and (k_ser.iloc[-2] <= d_ser.iloc[-2] or k_ser.iloc[-3] <= d_ser.iloc[-3])
+            return is_macd_up and is_macd_towards_zero and is_kd_gold
+
+        if check_single_tf(df_daily, c_daily) and check_single_tf(df_weekly, c_weekly):
+            return True
+    except: pass
+    return False
+
+def check_strat3_ma20_breakout(df_daily):
+    """
+    🆕 策略三：主力突破月線（強勢突破 20MA + 成交量 > 5日均量 1.5倍 + KD指南針向上）
+    """
+    try:
+        c_daily = df_daily['Close'].squeeze().astype(float)
+        v_daily = df_daily['Volume'].squeeze().astype(float)
+        o_daily = df_daily['Open'].squeeze().astype(float)
+        
+        ma20 = c_daily.rolling(window=20).mean()
+        v_ma5 = v_daily.rolling(window=5).mean()
+
+        # 1. 股價強勢突破 20 日均線 (今日收盤 > MA20，且 前一日在MA20之下 或 今日為紅K)
+        is_break_ma20 = (c_daily.iloc[-1] > ma20.iloc[-1]) and (c_daily.iloc[-2] <= ma20.iloc[-2] or c_daily.iloc[-1] > o_daily.iloc[-1])
+
+        # 2. 當日成交量 > 前一日 5日均量 的 1.5 倍
+        is_vol_spike = v_daily.iloc[-1] >= (v_ma5.iloc[-2] * 1.5)
+
+        # 3. KD 指南針向上（K > D 且 K線呈上升趨勢）
+        k_ser, d_ser = calculate_kd(df_daily)
+        is_kd_up = (k_ser.iloc[-1] > d_ser.iloc[-1]) and (k_ser.iloc[-1] > k_ser.iloc[-2])
+
+        if is_break_ma20 and is_vol_spike and is_kd_up:
+            vol_ratio = v_daily.iloc[-1] / v_ma5.iloc[-2] if v_ma5.iloc[-2] > 0 else 1.5
+            return True, vol_ratio
+    except: pass
+    return False
+
 def check_bollinger_squeeze_fast(df_daily):
-    """ 策略二：布林軌道極致壓縮 """
+    """ 策略四：布林軌道極致壓縮 """
     try:
         c_daily = df_daily['Close'].squeeze().astype(float)
         ma20 = c_daily.rolling(window=20).mean()
@@ -146,7 +189,7 @@ def check_bollinger_squeeze_fast(df_daily):
     return False
 
 def check_multi_timeframe_tangling(df_60m, df_daily, df_weekly):
-    """ 策略三：全週期同步糾結 """
+    """ 策略五：全週期同步糾結 """
     try:
         c_60m = df_60m['Close'].squeeze().astype(float)
         c_daily = df_daily['Close'].squeeze().astype(float)
@@ -161,7 +204,7 @@ def check_multi_timeframe_tangling(df_60m, df_daily, df_weekly):
     return False
 
 def check_extreme_drop_fast(df_daily):
-    """ 策略四：短線極限超賣 × 爆量紅K """
+    """ 策略六：短線極限超賣 × 爆量紅K """
     try:
         c_daily = df_daily['Close'].squeeze().astype(float)
         rsi6 = calculate_rsi(c_daily, period=6).iloc[-1]
@@ -169,8 +212,8 @@ def check_extreme_drop_fast(df_daily):
     except: pass
     return False
 
-def check_strat7_low_price_high_turnover(ticker, df_daily):
-    """ 策略七：主力進場換手股 """
+def check_strat9_low_price_high_turnover(ticker, df_daily):
+    """ 策略九：主力進場換手股 """
     try:
         shares = SHARES_OUTSTANDING_DATA.get(ticker)
         if not shares:
@@ -190,8 +233,8 @@ def check_strat7_low_price_high_turnover(ticker, df_daily):
     except: pass
     return False
 
-def check_strat8_two_month_squeeze_breakout(df_daily):
-    """ 策略八：雙月極限壓縮突破股 """
+def check_strat10_two_month_squeeze_breakout(df_daily):
+    """ 策略十：雙月極限壓縮突破股 """
     try:
         if len(df_daily) < 41: return False
         c_daily = df_daily['Close'].squeeze().astype(float)
@@ -231,68 +274,73 @@ def send_telegram_message(message):
     except Exception as e: print(f"❌ Telegram 發送異常: {e}")
 
 # ==============================================================================
-# 🚀 主程式
+# 🚀 主程式 (全 1 ~ 10 策略整合)
 # ==============================================================================
 if __name__ == "__main__":
     start_time = time.time()
     now_tw = pd.Timestamp.now(tz='UTC').tz_convert('Asia/Taipei')
     tw_time_str = now_tw.strftime('%Y-%m-%d %H:%M:%S')
 
-    print("🚀 啟動【台股 1~8 全策略極速過濾系統】...")
+    print("🚀 啟動【台股 1~10 全策略極速過濾系統】...")
     tech_scan_pool = fetch_all_taiwan_market_tickers()
     fetch_fast_chips_summary()
 
     print(f"⏳ 步驟 1: 打包下載全市場日K資料 (共 {len(tech_scan_pool)} 檔)...")
     full_df_daily = yf.download(tech_scan_pool, period="1y", interval="1d", progress=False, auto_adjust=True)
     
-    strat1, strat2, strat3, strat4, strat5, strat6, strat7, strat8 = [], [], [], [], [], [], [], []
+    # 初始化 1 ~ 10 策略結果清單
+    strat1, strat2, strat3, strat4, strat5, strat6, strat7, strat8, strat9, strat10 = [], [], [], [], [], [], [], [], [], []
     heavy_scan_pool = []
 
-    print("⏳ 步驟 2: 進行第一輪輕量策略篩選（日K與基本面）...")
+    print("⏳ 步驟 2: 進行第一輪日K與基本面策略篩選...")
     for ticker in tech_scan_pool:
         try:
             if ticker not in full_df_daily.columns.levels[1]: continue
             df_d = full_df_daily.xs(ticker, axis=1, level=1)
             if df_d.empty or len(df_d) < 120: continue 
             
-            # 20日均量 >= 1000張
+            # 核心防線：20日均量 >= 1000張
             if df_d['Volume'].rolling(window=20).mean().iloc[-1] / 1000 < 1000: continue
 
             name_zh = DYNAMIC_STOCK_NAMES.get(ticker, "")
             stock_label = f"<code>{ticker}</code>(<i>{name_zh}</i>)" if name_zh else f"<code>{ticker}</code>"
 
-            # 🛠️ 【策略二：布林壓縮】
+            # 🛠️ 【策略三：主力突破月線】
+            ma20_check = check_strat3_ma20_breakout(df_d)
+            if ma20_check: strat3.append(f"{stock_label}[爆量:{ma20_check[1]:.1f}倍]")
+
+            # 🛠️ 【策略四：布林壓縮】
             bo_check = check_bollinger_squeeze_fast(df_d)
-            if bo_check: strat2.append(f"{stock_label}[頻寬:{bo_check[1]:.1f}%]")
+            if bo_check: strat4.append(f"{stock_label}[頻寬:{bo_check[1]:.1f}%]")
 
-            # 🛠️ 【策略四：極限超賣】
-            if check_extreme_drop_fast(df_d): strat4.append(stock_label)
+            # 🛠️ 【策略六：極限超賣】
+            if check_extreme_drop_fast(df_d): strat6.append(stock_label)
 
-            # 🛠️ 【策略五：籌碼大戶模式】
-            if CHIPS_SUMMARY_DATA.get(ticker): strat5.append(f"{stock_label}[大戶持股連續加碼]")
+            # 🛠️ 【策略七：籌碼大戶模式】
+            if CHIPS_SUMMARY_DATA.get(ticker): strat7.append(f"{stock_label}[大戶持股連續加碼]")
 
-            # 🛠️ 【策略六：基本面價值低估】
+            # 🛠️ 【策略八：基本面價值低估】
             val = FUNDAMENTAL_DATA.get(ticker, {})
             if 0 < val.get("PE", 0) <= 12.0 and 0 < val.get("PB", 0) <= 1.0:
-                strat6.append(f"{stock_label}[PE:{val['PE']:.1f}, PB:{val['PB']:.2f}]")
+                strat8.append(f"{stock_label}[PE:{val['PE']:.1f}, PB:{val['PB']:.2f}]")
 
-            # 🛠️ 【策略七：主力進場換手股】
-            turnover_check = check_strat7_low_price_high_turnover(ticker, df_d)
+            # 🛠️ 【策略九：主力進場換手股】
+            turnover_check = check_strat9_low_price_high_turnover(ticker, df_d)
             if turnover_check: 
-                strat7.append(f"{stock_label}[位置:{turnover_check[1]:.1f}%, 換手:{turnover_check[2]:.1f}%]")
+                strat9.append(f"{stock_label}[位置:{turnover_check[1]:.1f}%, 換手:{turnover_check[2]:.1f}%]")
 
-            # 🛠️ 【策略八：雙月極限壓縮突破股】
-            sq_breakout = check_strat8_two_month_squeeze_breakout(df_d)
+            # 🛠️ 【策略十：雙月極限壓縮突破股】
+            sq_breakout = check_strat10_two_month_squeeze_breakout(df_d)
             if sq_breakout:
-                strat8.append(f"{stock_label}[雙月區間:{sq_breakout[1]:.1f}%]")
+                strat10.append(f"{stock_label}[雙月區間:{sq_breakout[1]:.1f}%]")
 
-            # 進入多週期掃描池
+            # 精選多週期掃描池
             if df_d['Close'].iloc[-1] > df_d['Close'].rolling(20).mean().iloc[-1]:
                 heavy_scan_pool.append(ticker)
 
         except: continue
 
-    # ⏳ 步驟 3: 多週期深度掃描 (30分K、60分K 與 週K)
+    # ⏳ 步驟 3: 下載多週期資料 (30分K、60分K 與 週K)
     final_heavy_pool = heavy_scan_pool[:40]
     if final_heavy_pool:
         print(f"⏳ 步驟 3: 下載精選 {len(final_heavy_pool)} 檔標的的 30分K、60分K 與 週K...")
@@ -319,9 +367,13 @@ if __name__ == "__main__":
                 if check_strat1_resonance(df_m30, df_m60): 
                     strat1.append(stock_label)
 
-                # 🛠️ 【策略三：全週期同步糾結】
+                # 🛠️ 【策略二：日K/週K MACD往0軸向上 + KD黃金交叉】
+                if check_strat2_daily_weekly_resonance(df_d, df_w):
+                    strat2.append(stock_label)
+
+                # 🛠️ 【策略五：時/日/週 全週期同步糾結】
                 if check_multi_timeframe_tangling(df_m60, df_d, df_w): 
-                    strat3.append(stock_label)
+                    strat5.append(stock_label)
             except: continue
 
     # 📝 Telegram 報告輸出
@@ -331,26 +383,32 @@ if __name__ == "__main__":
     tw_msg += "📈 <b>【策略一】30分/60分K MACD趨向0軸向上 + KD黃金交叉</b>\n"
     tw_msg += f"↳ {', '.join(strat1) if strat1 else '今日無符合標的。 💤'}\n\n"
 
-    tw_msg += "💥 <b>【策略二】布林軌道壓縮 (頻寬極致壓縮 ≤ 6% 臨界面)</b>\n"
+    tw_msg += "📊 <b>【策略二】日K/週K MACD趨向0軸向上 + KD黃金交叉</b>\n"
     tw_msg += f"↳ {', '.join(strat2) if strat2 else '今日無符合標的。 💤'}\n\n"
 
-    tw_msg += "💎 <b>【策略三】時/日/週 全週期同步糾結 (不限排列)</b>\n"
+    tw_msg += "🚀 <b>【策略三】主力突破月線 (突破20MA × 成交量>1.5倍5日均量 × KD指南針向上)</b>\n"
     tw_msg += f"↳ {', '.join(strat3) if strat3 else '今日無符合標的。 💤'}\n\n"
 
-    tw_msg += "🔥 <b>【策略四】短線極限超賣 × 爆量紅K (恐慌止跌)</b>\n"
+    tw_msg += "💥 <b>【策略四】布林軌道壓縮 (頻寬極致壓縮 ≤ 6% 臨界面)</b>\n"
     tw_msg += f"↳ {', '.join(strat4) if strat4 else '今日無符合標的。 💤'}\n\n"
 
-    tw_msg += "🎯 <b>【策略五】大戶控盤波段股 (千張大戶連續加碼)</b>\n"
+    tw_msg += "💎 <b>【策略五】時/日/週 全週期同步糾結 (不限排列)</b>\n"
     tw_msg += f"↳ {', '.join(strat5) if strat5 else '今日無符合標的。 💤'}\n\n"
 
-    tw_msg += "💰 <b>【策略六】價值型低估股 (本益比 ≤ 12 × 股價淨值比 ≤ 1.0)</b>\n"
+    tw_msg += "🔥 <b>【策略六】短線極限超賣 × 爆量紅K (恐慌止跌)</b>\n"
     tw_msg += f"↳ {', '.join(strat6) if strat6 else '今日無符合標的。 💤'}\n\n"
 
-    tw_msg += "🔄 <b>【策略七】主力進場換手股 (股價半年低檔區 × 換手率 10% - 17%)</b>\n"
+    tw_msg += "🎯 <b>【策略七】大戶控盤波段股 (千張大戶連續加碼)</b>\n"
     tw_msg += f"↳ {', '.join(strat7) if strat7 else '今日無符合標的。 💤'}\n\n"
 
-    tw_msg += "🚀 <b>【策略八】雙月極限壓縮突破股 (雙月幅度 10%-15% × 首根創高紅K)</b>\n"
-    tw_msg += f"↳ {', '.join(strat8) if strat8 else '今日無符合標的。 💤'}\n"
+    tw_msg += "💰 <b>【策略八】價值型低估股 (本益比 ≤ 12 × 股價淨值比 ≤ 1.0)</b>\n"
+    tw_msg += f"↳ {', '.join(strat8) if strat8 else '今日無符合標的。 💤'}\n\n"
+
+    tw_msg += "🔄 <b>【策略九】主力進場換手股 (股價半年低檔區 × 換手率 10% - 17%)</b>\n"
+    tw_msg += f"↳ {', '.join(strat9) if strat9 else '今日無符合標的。 💤'}\n\n"
+
+    tw_msg += "⚡ <b>【策略十】雙月極限壓縮突破股 (雙月幅度 10%-15% × 首根創高紅K)</b>\n"
+    tw_msg += f"↳ {', '.join(strat10) if strat10 else '今日無符合標的。 💤'}\n"
 
     send_telegram_message(tw_msg)
-    print(f"✅ 1~8 全策略報告發送完成！總耗時: {time.time() - start_time:.1f} 秒")
+    print(f"✅ 1~10 全策略報告發送完成！總耗時: {time.time() - start_time:.1f} 秒")
