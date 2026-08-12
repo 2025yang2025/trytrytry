@@ -102,7 +102,7 @@ def calculate_rsi(close_series, period=6):
     return (100 - (100 / (1 + (gain / loss)))).fillna(50)
 
 # ==============================================================================
-# 🎯 策略判斷邏輯（整合策略 1 ~ 10）
+# 🎯 策略判斷邏輯（整合策略 1 ~ 11）
 # ==============================================================================
 def check_strat1_resonance(df_30m, df_60m):
     """ 策略一：30分與60分K棒 MACD 往0軸向上 + KD黃金交叉 """
@@ -125,9 +125,7 @@ def check_strat1_resonance(df_30m, df_60m):
     return False
 
 def check_strat2_daily_weekly_resonance(df_daily, df_weekly):
-    """
-    🆕 策略二：日K與週K MACD 往0軸向上 + KD黃金交叉
-    """
+    """ 策略二：日K與週K MACD 往0軸向上 + KD黃金交叉 """
     try:
         c_daily = df_daily['Close'].squeeze().astype(float)
         c_weekly = df_weekly['Close'].squeeze().astype(float)
@@ -147,9 +145,7 @@ def check_strat2_daily_weekly_resonance(df_daily, df_weekly):
     return False
 
 def check_strat3_ma20_breakout(df_daily):
-    """
-    🆕 策略三：主力突破月線（強勢突破 20MA + 成交量 > 5日均量 1.5倍 + KD指南針向上）
-    """
+    """ 策略三：主力突破月線 (強勢突破 20MA + 成交量 > 5日均量 1.5倍 + KD指南針向上) """
     try:
         c_daily = df_daily['Close'].squeeze().astype(float)
         v_daily = df_daily['Volume'].squeeze().astype(float)
@@ -158,13 +154,9 @@ def check_strat3_ma20_breakout(df_daily):
         ma20 = c_daily.rolling(window=20).mean()
         v_ma5 = v_daily.rolling(window=5).mean()
 
-        # 1. 股價強勢突破 20 日均線 (今日收盤 > MA20，且 前一日在MA20之下 或 今日為紅K)
         is_break_ma20 = (c_daily.iloc[-1] > ma20.iloc[-1]) and (c_daily.iloc[-2] <= ma20.iloc[-2] or c_daily.iloc[-1] > o_daily.iloc[-1])
-
-        # 2. 當日成交量 > 前一日 5日均量 的 1.5 倍
         is_vol_spike = v_daily.iloc[-1] >= (v_ma5.iloc[-2] * 1.5)
 
-        # 3. KD 指南針向上（K > D 且 K線呈上升趨勢）
         k_ser, d_ser = calculate_kd(df_daily)
         is_kd_up = (k_ser.iloc[-1] > d_ser.iloc[-1]) and (k_ser.iloc[-1] > k_ser.iloc[-2])
 
@@ -261,6 +253,36 @@ def check_strat10_two_month_squeeze_breakout(df_daily):
     except: pass
     return False
 
+def check_strat11_low_price_volume_surge(df_daily):
+    """
+    🆕 策略十一：低檔爆量股 (半年近120日低位階 ≤ 30% × 當日成交量 ≥ 5日均量2.5倍 × 實體紅K)
+    """
+    try:
+        c_daily = df_daily['Close'].squeeze().astype(float)
+        v_daily = df_daily['Volume'].squeeze().astype(float)
+        o_daily = df_daily['Open'].squeeze().astype(float)
+
+        low_120 = c_daily.rolling(window=120).min().iloc[-1]
+        high_120 = c_daily.rolling(window=120).max().iloc[-1]
+        if high_120 == low_120: return False
+
+        # 1. 低檔位階判斷 (近 120 日相對位階 <= 30%)
+        price_position = (c_daily.iloc[-1] - low_120) / (high_120 - low_120)
+        is_low_position = price_position <= 0.30
+
+        # 2. 成交量爆量判斷 (當日量 >= 前一日 5日均量 的 2.5 倍)
+        v_ma5_prev = v_daily.rolling(window=5).mean().iloc[-2]
+        is_volume_surge = (v_daily.iloc[-1] >= v_ma5_prev * 2.5) if v_ma5_prev > 0 else False
+
+        # 3. 實體紅 K (收盤價 > 開盤價)
+        is_red_k = c_daily.iloc[-1] > o_daily.iloc[-1]
+
+        if is_low_position and is_volume_surge and is_red_k:
+            vol_multiple = v_daily.iloc[-1] / v_ma5_prev if v_ma5_prev > 0 else 2.5
+            return True, price_position * 100, vol_multiple
+    except: pass
+    return False
+
 # ==============================================================================
 # 💬 Telegram 發送
 # ==============================================================================
@@ -274,22 +296,22 @@ def send_telegram_message(message):
     except Exception as e: print(f"❌ Telegram 發送異常: {e}")
 
 # ==============================================================================
-# 🚀 主程式 (全 1 ~ 10 策略整合)
+# 🚀 主程式 (全 1 ~ 11 策略整合)
 # ==============================================================================
 if __name__ == "__main__":
     start_time = time.time()
     now_tw = pd.Timestamp.now(tz='UTC').tz_convert('Asia/Taipei')
     tw_time_str = now_tw.strftime('%Y-%m-%d %H:%M:%S')
 
-    print("🚀 啟動【台股 1~10 全策略極速過濾系統】...")
+    print("🚀 啟動【台股 1~11 全策略極速過濾系統】...")
     tech_scan_pool = fetch_all_taiwan_market_tickers()
     fetch_fast_chips_summary()
 
     print(f"⏳ 步驟 1: 打包下載全市場日K資料 (共 {len(tech_scan_pool)} 檔)...")
     full_df_daily = yf.download(tech_scan_pool, period="1y", interval="1d", progress=False, auto_adjust=True)
     
-    # 初始化 1 ~ 10 策略結果清單
-    strat1, strat2, strat3, strat4, strat5, strat6, strat7, strat8, strat9, strat10 = [], [], [], [], [], [], [], [], [], []
+    # 初始化 1 ~ 11 策略結果清單
+    strat1, strat2, strat3, strat4, strat5, strat6, strat7, strat8, strat9, strat10, strat11 = [], [], [], [], [], [], [], [], [], [], []
     heavy_scan_pool = []
 
     print("⏳ 步驟 2: 進行第一輪日K與基本面策略篩選...")
@@ -333,6 +355,11 @@ if __name__ == "__main__":
             sq_breakout = check_strat10_two_month_squeeze_breakout(df_d)
             if sq_breakout:
                 strat10.append(f"{stock_label}[雙月區間:{sq_breakout[1]:.1f}%]")
+
+            # 🛠️ 【策略十一：低檔爆量股】
+            low_vol_check = check_strat11_low_price_volume_surge(df_d)
+            if low_vol_check:
+                strat11.append(f"{stock_label}[位階:{low_vol_check[1]:.1f}%, 爆量:{low_vol_check[2]:.1f}倍]")
 
             # 精選多週期掃描池
             if df_d['Close'].iloc[-1] > df_d['Close'].rolling(20).mean().iloc[-1]:
@@ -408,7 +435,10 @@ if __name__ == "__main__":
     tw_msg += f"↳ {', '.join(strat9) if strat9 else '今日無符合標的。 💤'}\n\n"
 
     tw_msg += "⚡ <b>【策略十】雙月極限壓縮突破股 (雙月幅度 10%-15% × 首根創高紅K)</b>\n"
-    tw_msg += f"↳ {', '.join(strat10) if strat10 else '今日無符合標的。 💤'}\n"
+    tw_msg += f"↳ {', '.join(strat10) if strat10 else '今日無符合標的。 💤'}\n\n"
+
+    tw_msg += "💥 <b>【策略十一】低檔爆量股 (半年位階 ≤ 30% × 成交量 ≥ 2.5倍5日均量 × 紅K)</b>\n"
+    tw_msg += f"↳ {', '.join(strat11) if strat11 else '今日無符合標的。 💤'}\n"
 
     send_telegram_message(tw_msg)
-    print(f"✅ 1~10 全策略報告發送完成！總耗時: {time.time() - start_time:.1f} 秒")
+    print(f"✅ 1~11 全策略報告發送完成！總耗時: {time.time() - start_time:.1f} 秒")
