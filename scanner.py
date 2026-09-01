@@ -58,7 +58,7 @@ def calculate_rsi(close_series, period=6):
     return (100 - (100 / (1 + (gain / loss)))).fillna(50)
 
 # ==============================================================================
-# 🎯 策略判斷邏輯（最新 1 ~ 8 策略精簡架構）
+# 🎯 策略判斷邏輯 (顯示調整為：當下價格)
 # ==============================================================================
 def check_strat1_resonance(df_30m, df_60m):
     """ 策略一：30分與60分K棒 MACD 往0軸向上 + KD黃金交叉 """
@@ -76,12 +76,12 @@ def check_strat1_resonance(df_30m, df_60m):
             return is_macd_up and is_macd_towards_zero and is_kd_gold
 
         if check_single_tf(df_30m, c_30m) and check_single_tf(df_60m, c_60m):
-            return True
+            return True, c_60m.iloc[-1]
     except: pass
     return False
 
 def check_strat2_daily_60m_resonance(df_60m, df_daily):
-    """ 🆕 策略二：60分K與日K棒 MACD 往0軸向上 + KD黃金交叉 """
+    """ 策略二：60分K與日K棒 MACD 往0軸向上 + KD黃金交叉 """
     try:
         c_60m = df_60m['Close'].squeeze().astype(float)
         c_daily = df_daily['Close'].squeeze().astype(float)
@@ -96,12 +96,12 @@ def check_strat2_daily_60m_resonance(df_60m, df_daily):
             return is_macd_up and is_macd_towards_zero and is_kd_gold
 
         if check_single_tf(df_60m, c_60m) and check_single_tf(df_daily, c_daily):
-            return True
+            return True, c_daily.iloc[-1]
     except: pass
     return False
 
 def check_strat3_daily_weekly_resonance(df_daily, df_weekly):
-    """ 策略三（原策略二）：日K與週K MACD 往0軸向上 + KD黃金交叉 """
+    """ 策略三：日K與週K MACD 往0軸向上 + KD黃金交叉 """
     try:
         c_daily = df_daily['Close'].squeeze().astype(float)
         c_weekly = df_weekly['Close'].squeeze().astype(float)
@@ -116,12 +116,12 @@ def check_strat3_daily_weekly_resonance(df_daily, df_weekly):
             return is_macd_up and is_macd_towards_zero and is_kd_gold
 
         if check_single_tf(df_daily, c_daily) and check_single_tf(df_weekly, c_weekly):
-            return True
+            return True, c_daily.iloc[-1]
     except: pass
     return False
 
 def check_strat4_ma20_breakout(df_daily):
-    """ 策略四（原策略三）：主力突破月線 """
+    """ 策略四：主力突破月線 (改為回傳現價) """
     try:
         c_daily = df_daily['Close'].squeeze().astype(float)
         v_daily = df_daily['Volume'].squeeze().astype(float)
@@ -137,13 +137,12 @@ def check_strat4_ma20_breakout(df_daily):
         is_kd_up = (k_ser.iloc[-1] > d_ser.iloc[-1]) and (k_ser.iloc[-1] > k_ser.iloc[-2])
 
         if is_break_ma20 and is_vol_spike and is_kd_up:
-            vol_ratio = v_daily.iloc[-1] / v_ma5.iloc[-2] if v_ma5.iloc[-2] > 0 else 1.5
-            return True, vol_ratio
+            return True, c_daily.iloc[-1]
     except: pass
     return False
 
 def check_strat5_volume_breakout(df_daily):
-    """ 策略五（原策略四）：關鍵均線多頭突破 × 量能倍增 (帶量突破) """
+    """ 策略五：關鍵均線多頭突破 × 量能倍增 (改為回傳現價) """
     try:
         if df_daily.empty or len(df_daily) < 20: return False
         
@@ -170,8 +169,7 @@ def check_strat5_volume_breakout(df_daily):
         kd_cond = (k_today > d_today) and (k_today < 75)
         
         if kd_cond:
-            volume_ratio = volume_today / v_ma5 if v_ma5 > 0 else 1.0
-            return True, volume_ratio
+            return True, close_today
     except Exception:
         pass
     return False
@@ -187,7 +185,8 @@ def check_strat6_multi_timeframe_tangling(df_60m, df_daily, df_weekly):
         d_tangle = (max(c_daily.rolling(5).mean().iloc[-1], c_daily.rolling(10).mean().iloc[-1], c_daily.rolling(20).mean().iloc[-1]) - min(c_daily.rolling(5).mean().iloc[-1], c_daily.rolling(10).mean().iloc[-1], c_daily.rolling(20).mean().iloc[-1])) / c_daily.rolling(20).mean().iloc[-1]
         w_tangle = (max(c_weekly.rolling(5).mean().iloc[-1], c_weekly.rolling(10).mean().iloc[-1], c_weekly.rolling(20).mean().iloc[-1]) - min(c_weekly.rolling(5).mean().iloc[-1], c_weekly.rolling(10).mean().iloc[-1], c_weekly.rolling(20).mean().iloc[-1])) / c_weekly.rolling(20).mean().iloc[-1]
         
-        if m60_tangle < 0.025 and d_tangle < 0.03 and w_tangle < 0.035 and c_daily.iloc[-1] > c_daily.rolling(20).mean().iloc[-1]: return True
+        if m60_tangle < 0.025 and d_tangle < 0.03 and w_tangle < 0.035 and c_daily.iloc[-1] > c_daily.rolling(20).mean().iloc[-1]:
+            return True, c_daily.iloc[-1]
     except: pass
     return False
 
@@ -196,12 +195,13 @@ def check_strat7_extreme_drop_fast(df_daily):
     try:
         c_daily = df_daily['Close'].squeeze().astype(float)
         rsi6 = calculate_rsi(c_daily, period=6).iloc[-1]
-        if rsi6 < 20 and c_daily.iloc[-1] > df_daily['Open'].squeeze().astype(float).iloc[-1] and df_daily['Volume'].squeeze().astype(float).iloc[-1] > df_daily['Volume'].squeeze().astype(float).rolling(5).mean().iloc[-1]: return True
+        if rsi6 < 20 and c_daily.iloc[-1] > df_daily['Open'].squeeze().astype(float).iloc[-1] and df_daily['Volume'].squeeze().astype(float).iloc[-1] > df_daily['Volume'].squeeze().astype(float).rolling(5).mean().iloc[-1]:
+            return True, c_daily.iloc[-1]
     except: pass
     return False
 
 def check_strat8_low_price_volume_surge(df_daily):
-    """ 策略八（原策略十二）：低檔爆量股 """
+    """ 策略八：低檔爆量股 (改為回傳現價與位階) """
     try:
         c_daily = df_daily['Close'].squeeze().astype(float)
         v_daily = df_daily['Volume'].squeeze().astype(float)
@@ -220,8 +220,7 @@ def check_strat8_low_price_volume_surge(df_daily):
         is_red_k = c_daily.iloc[-1] > o_daily.iloc[-1]
 
         if is_low_position and is_volume_surge and is_red_k:
-            vol_multiple = v_daily.iloc[-1] / v_ma5_prev if v_ma5_prev > 0 else 2.5
-            return True, price_position * 100, vol_multiple
+            return True, c_daily.iloc[-1], price_position * 100
     except: pass
     return False
 
@@ -238,14 +237,14 @@ def send_telegram_message(message):
     except Exception as e: print(f"❌ Telegram 發送異常: {e}")
 
 # ==============================================================================
-# 🚀 主程式 (最新 1 ~ 8 全策略整合)
+# 🚀 主程式
 # ==============================================================================
 if __name__ == "__main__":
     start_time = time.time()
     now_tw = pd.Timestamp.now(tz='UTC').tz_convert('Asia/Taipei')
     tw_time_str = now_tw.strftime('%Y-%m-%d %H:%M:%S')
 
-    print("🚀 啟動【台股 1~8 最新精簡策略過濾系統】...")
+    print("🚀 啟動【台股 1~8 策略過濾系統（價格顯示版）】...")
     tech_scan_pool = fetch_all_taiwan_market_tickers()
 
     print(f"⏳ 步驟 1: 打包下載全市場日K資料 (共 {len(tech_scan_pool)} 檔)...")
@@ -270,19 +269,23 @@ if __name__ == "__main__":
 
             # 🛠️ 【策略四：主力突破月線】
             ma20_check = check_strat4_ma20_breakout(df_d)
-            if ma20_check: strat4.append(f"{stock_label}[爆量:{ma20_check[1]:.1f}倍]")
+            if ma20_check: 
+                strat4.append(f"{stock_label}[{ma20_check[1]:.2f}元]")
 
             # 🛠️ 【策略五：關鍵均線多頭突破 × 量能倍增】
             vol_break = check_strat5_volume_breakout(df_d)
-            if vol_break: strat5.append(f"{stock_label}[爆量:{vol_break[1]:.1f}倍]")
+            if vol_break: 
+                strat5.append(f"{stock_label}[{vol_break[1]:.2f}元]")
 
             # 🛠️ 【策略七：極限超賣】
-            if check_strat7_extreme_drop_fast(df_d): strat7.append(stock_label)
+            drop_check = check_strat7_extreme_drop_fast(df_d)
+            if drop_check: 
+                strat7.append(f"{stock_label}[{drop_check[1]:.2f}元]")
 
             # 🛠️ 【策略八：低檔爆量股】
             low_vol_check = check_strat8_low_price_volume_surge(df_d)
             if low_vol_check:
-                strat8.append(f"{stock_label}[位階:{low_vol_check[1]:.1f}%, 爆量:{low_vol_check[2]:.1f}倍]")
+                strat8.append(f"{stock_label}[{low_vol_check[1]:.2f}元|位階:{low_vol_check[2]:.1f}%]")
 
             # 精選多週期掃描池
             if df_d['Close'].iloc[-1] > df_d['Close'].rolling(20).mean().iloc[-1]:
@@ -314,20 +317,24 @@ if __name__ == "__main__":
                 stock_label = f"<code>{ticker}</code>(<i>{name_zh}</i>)" if name_zh else f"<code>{ticker}</code>"
 
                 # 🛠️ 【策略一：30m/60m MACD往0軸向上 + KD黃金交叉】
-                if check_strat1_resonance(df_m30, df_m60): 
-                    strat1.append(stock_label)
+                res1 = check_strat1_resonance(df_m30, df_m60)
+                if res1: 
+                    strat1.append(f"{stock_label}[{res1[1]:.2f}元]")
 
                 # 🛠️ 【策略二：60m/日K MACD往0軸向上 + KD黃金交叉】
-                if check_strat2_daily_60m_resonance(df_m60, df_d):
-                    strat2.append(stock_label)
+                res2 = check_strat2_daily_60m_resonance(df_m60, df_d)
+                if res2:
+                    strat2.append(f"{stock_label}[{res2[1]:.2f}元]")
 
                 # 🛠️ 【策略三：日K/週K MACD往0軸向上 + KD黃金交叉】
-                if check_strat3_daily_weekly_resonance(df_d, df_w):
-                    strat3.append(stock_label)
+                res3 = check_strat3_daily_weekly_resonance(df_d, df_w)
+                if res3:
+                    strat3.append(f"{stock_label}[{res3[1]:.2f}元]")
 
                 # 🛠️ 【策略六：時/日/週 全週期同步糾結】
-                if check_strat6_multi_timeframe_tangling(df_m60, df_d, df_w): 
-                    strat6.append(stock_label)
+                res6 = check_strat6_multi_timeframe_tangling(df_m60, df_d, df_w)
+                if res6: 
+                    strat6.append(f"{stock_label}[{res6[1]:.2f}元]")
             except: continue
 
     # 📝 Telegram 報告輸出
@@ -359,4 +366,4 @@ if __name__ == "__main__":
     tw_msg += f"↳ {', '.join(strat8) if strat8 else '今日無符合標的。 💤'}\n"
 
     send_telegram_message(tw_msg)
-    print(f"✅ 最新 1~8 策略報告發送完成！總耗時: {time.time() - start_time:.1f} 秒")
+    print(f"✅ 策略報告發送完成！總耗時: {time.time() - start_time:.1f} 秒")
