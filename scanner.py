@@ -31,6 +31,46 @@ def fetch_all_taiwan_market_tickers():
     return sorted(list(set(all_tickers)))
 
 # ==============================================================================
+# 🛡️ 安全分批下載模組（解決 Connection timed out / Rate limit 問題）
+# ==============================================================================
+def safe_download_yf(tickers, period, interval, chunk_size=200):
+    """
+    分批安全下載 yfinance 資料，避免一次請求上千檔導致 Timeout 或被鎖 IP
+    """
+    all_dfs = []
+    total_chunks = (len(tickers) + chunk_size - 1) // chunk_size
+
+    for i in range(0, len(tickers), chunk_size):
+        chunk = tickers[i:i + chunk_size]
+        current_chunk = (i // chunk_size) + 1
+        
+        # 進行最多 2 次重試機制
+        for attempt in range(2):
+            try:
+                df = yf.download(
+                    chunk, 
+                    period=period, 
+                    interval=interval, 
+                    progress=False, 
+                    auto_adjust=True,
+                    threads=True
+                )
+                if not df.empty:
+                    all_dfs.append(df)
+                break  # 下載成功，跳出重試迴圈
+            except Exception as e:
+                if attempt == 1:
+                    print(f"⚠️ 批次 {current_chunk}/{total_chunks} 下載失敗: {e}")
+                time.sleep(1) # 重試前緩衝
+
+        time.sleep(0.3)  # 每次分批間隔 0.3 秒，避免觸發 Yahoo 限流
+
+    if all_dfs:
+        # 將分批下載的 DataFrame 合併
+        return pd.concat(all_dfs, axis=1)
+    return pd.DataFrame()
+
+# ==============================================================================
 # 📊 技術指標算術模組
 # ==============================================================================
 def calculate_macd(close_series, fast=12, slow=26, signal=9):
@@ -63,9 +103,6 @@ def calculate_rsi(close_series, period=6):
 def check_macd_kd_threshold(df_tf, kd_threshold=20, macd_above_zero=False):
     """
     通用模組：判斷 MACD 與 KD 條件
-    - macd_above_zero=False: MACD 柱狀體向上或柱體擴大 (趨向0軸)
-    - macd_above_zero=True: MACD DIF線 > 0 (0軸以上)
-    - kd_threshold: K值與D值皆須大於指定數值
     """
     try:
         if df_tf.empty or len(df_tf) < 30: return False, 0.0
@@ -199,9 +236,10 @@ if __name__ == "__main__":
     print("🚀 啟動【台股全新 8 大策略選股系統】...")
     tech_scan_pool = fetch_all_taiwan_market_tickers()
 
-    print(f"⏳ 步驟 1: 下載全市場日K與週K資料 (共 {len(tech_scan_pool)} 檔)...")
-    full_df_daily = yf.download(tech_scan_pool, period="1y", interval="1d", progress=False, auto_adjust=True)
-    full_df_weekly = yf.download(tech_scan_pool, period="2y", interval="1wk", progress=False, auto_adjust=True)
+    print(f"⏳ 步驟 1: 安全分批下載全市場日K與週K資料 (共 {len(tech_scan_pool)} 檔)...")
+    # 每批次下載 250 檔，避免連線逾時
+    full_df_daily = safe_download_yf(tech_scan_pool, period="1y", interval="1d", chunk_size=250)
+    full_df_weekly = safe_download_yf(tech_scan_pool, period="2y", interval="1wk", chunk_size=250)
 
     # 初始化 1 ~ 8 策略結果清單
     strat1, strat2, strat3, strat4, strat5, strat6, strat7, strat8 = [], [], [], [], [], [], [], []
@@ -262,8 +300,8 @@ if __name__ == "__main__":
     final_heavy_pool = heavy_scan_pool[:50]
     if final_heavy_pool:
         print(f"⏳ 步驟 3: 下載精選 {len(final_heavy_pool)} 檔標的的 30分K 與 60分K 資料...")
-        full_df_30m = yf.download(final_heavy_pool, period="1mo", interval="30m", progress=False, auto_adjust=True)
-        full_df_60m = yf.download(final_heavy_pool, period="1mo", interval="60m", progress=False, auto_adjust=True)
+        full_df_30m = safe_download_yf(final_heavy_pool, period="1mo", interval="30m", chunk_size=50)
+        full_df_60m = safe_download_yf(final_heavy_pool, period="1mo", interval="60m", chunk_size=50)
 
         for ticker in final_heavy_pool:
             try:
