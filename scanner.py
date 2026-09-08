@@ -216,29 +216,51 @@ def check_strat_orig_8(df_daily):
 # ==============================================================================
 # 💬 Telegram 發送模組
 # ==============================================================================
-def send_telegram_message(message):
+def send_telegram_message(message, max_length=3500):
+    """
+    發送 Telegram 訊息，若內容超過長度限制則自動拆分多封發送
+    """
     bot_token = os.environ.get("TG_BOT_TOKEN")
     chat_id = os.environ.get("TG_CHAT_ID")
     
-    # 檢查環境變數
     if not bot_token or not chat_id:
-        print("❌ 錯誤：未偵測到 TG_BOT_TOKEN 或 TG_CHAT_ID 環境變數！")
-        print(f"   -> TG_BOT_TOKEN: {'已設定' if bot_token else '未設定'}")
-        print(f"   -> TG_CHAT_ID: {'已設定' if chat_id else '未設定'}")
+        print("❌ 錯誤：未設定 TG_BOT_TOKEN 或 TG_CHAT_ID 環境變數！")
         return
 
     url = f"https://api.telegram.org/bot{str(bot_token).strip()}/sendMessage"
-    payload = {"chat_id": str(chat_id).strip(), "text": message, "parse_mode": "HTML"}
-    
-    try:
-        response = requests.post(url, json=payload, timeout=10)
-        res_json = response.json()
-        if response.status_code == 200 and res_json.get("ok"):
-            print("✅ Telegram 訊息已成功發送！")
+
+    # 按換行符拆分，確保 HTML 標籤不會在半空中被切斷
+    lines = message.split('\n')
+    chunks = []
+    current_chunk = ""
+
+    for line in lines:
+        if len(current_chunk) + len(line) + 1 > max_length:
+            chunks.append(current_chunk)
+            current_chunk = line + "\n"
         else:
-            print(f"❌ Telegram 發送失敗 (HTTP {response.status_code}): {res_json}")
-    except Exception as e:
-        print(f"❌ Telegram 連線異常: {e}")
+            current_chunk += line + "\n"
+    if current_chunk:
+        chunks.append(current_chunk)
+
+    # 依序發送拆分後的訊息
+    for idx, chunk in enumerate(chunks, 1):
+        payload = {
+            "chat_id": str(chat_id).strip(),
+            "text": chunk.strip(),
+            "parse_mode": "HTML"
+        }
+        try:
+            res = requests.post(url, json=payload, timeout=10)
+            res_json = res.json()
+            if res.status_code == 200 and res_json.get("ok"):
+                print(f"✅ Telegram 訊息段落 ({idx}/{len(chunks)}) 發送成功！")
+            else:
+                print(f"❌ Telegram 發送失敗 (HTTP {res.status_code}): {res_json}")
+        except Exception as e:
+            print(f"❌ Telegram 發送連線異常: {e}")
+            
+        time.sleep(0.5) # 避開 Telegram 發送頻率限制
 
 # ==============================================================================
 # 🚀 主程式
