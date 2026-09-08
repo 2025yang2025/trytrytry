@@ -219,11 +219,26 @@ def check_strat_orig_8(df_daily):
 def send_telegram_message(message):
     bot_token = os.environ.get("TG_BOT_TOKEN")
     chat_id = os.environ.get("TG_CHAT_ID")
-    if not bot_token or not chat_id: return
+    
+    # 檢查環境變數
+    if not bot_token or not chat_id:
+        print("❌ 錯誤：未偵測到 TG_BOT_TOKEN 或 TG_CHAT_ID 環境變數！")
+        print(f"   -> TG_BOT_TOKEN: {'已設定' if bot_token else '未設定'}")
+        print(f"   -> TG_CHAT_ID: {'已設定' if chat_id else '未設定'}")
+        return
+
     url = f"https://api.telegram.org/bot{str(bot_token).strip()}/sendMessage"
     payload = {"chat_id": str(chat_id).strip(), "text": message, "parse_mode": "HTML"}
-    try: requests.post(url, json=payload, timeout=10)
-    except Exception as e: print(f"❌ Telegram 發送異常: {e}")
+    
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        res_json = response.json()
+        if response.status_code == 200 and res_json.get("ok"):
+            print("✅ Telegram 訊息已成功發送！")
+        else:
+            print(f"❌ Telegram 發送失敗 (HTTP {response.status_code}): {res_json}")
+    except Exception as e:
+        print(f"❌ Telegram 連線異常: {e}")
 
 # ==============================================================================
 # 🚀 主程式
