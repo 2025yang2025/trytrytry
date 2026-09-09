@@ -4,8 +4,8 @@ import pandas as pd
 import yfinance as yf
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+TELEGRAM_TOKEN = os.environ.get("TG_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TG_CHAT_ID")
 
 def get_all_taiwan_stock_tickers():
     """抓取全台股普通股清單"""
