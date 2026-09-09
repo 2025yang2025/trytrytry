@@ -2,9 +2,9 @@
 # ==============================================================================
 # 台股 策略選股 Pro v3.0 (分K/日K/週K/月K 多週期)
 #
-# 策略一：30分K MACD 負值減少 + KD > 40
-# 策略二：60分K MACD 負值減少 + KD > 40
-# 策略三：日K MACD > 0 + KD > 20
+# 策略一：30分K MACD 負值減少 + KD > 50
+# 策略二：60分K MACD 負值減少 + KD > 50
+# 策略三：日K MACD > 0 + KD > 30
 # 策略四：週K MACD > 0 + KD > 50
 # 策略五：月K MACD > 0 + KD > 50
 #
@@ -181,28 +181,28 @@ def is_macd_hist_negative_reducing(hist: pd.Series) -> bool:
 # 策略邏輯檢測
 # ==============================================================================
 def check_strategy_1(df_30m: pd.DataFrame) -> bool:
-    """【策略一】30分K MACD負值減少 + KD > 40"""
+    """【策略一】30分K MACD負值減少 + KD > 50"""
     if df_30m.empty or len(df_30m) < 35:
         return False
     _, _, hist = calculate_macd(df_30m["close"])
     k, _ = calculate_kd(df_30m)
-    return is_macd_hist_negative_reducing(hist) and (k.iloc[-1] > 40)
+    return is_macd_hist_negative_reducing(hist) and (k.iloc[-1] > 50)
 
 def check_strategy_2(df_60m: pd.DataFrame) -> bool:
-    """【策略二】60分K MACD負值減少 + KD > 40"""
+    """【策略二】60分K MACD負值減少 + KD > 50"""
     if df_60m.empty or len(df_60m) < 35:
         return False
     _, _, hist = calculate_macd(df_60m["close"])
     k, _ = calculate_kd(df_60m)
-    return is_macd_hist_negative_reducing(hist) and (k.iloc[-1] > 40)
+    return is_macd_hist_negative_reducing(hist) and (k.iloc[-1] > 50)
 
 def check_strategy_3(df_daily: pd.DataFrame) -> bool:
-    """【策略三】日K MACD > 0 + KD > 20"""
+    """【策略三】日K MACD > 0 + KD > 30"""
     if df_daily.empty or len(df_daily) < 35:
         return False
     macd, _, _ = calculate_macd(df_daily["close"])
     k, _ = calculate_kd(df_daily)
-    return (macd.iloc[-1] > 0) and (k.iloc[-1] > 20)
+    return (macd.iloc[-1] > 0) and (k.iloc[-1] > 30)
 
 def check_strategy_4(df_weekly: pd.DataFrame) -> bool:
     """【策略四】週K MACD > 0 + KD > 50"""
@@ -299,9 +299,9 @@ def main():
     print("==================================================================")
 
     strategies = [
-        ("s1", "【策略一】30分K MACD負值減少 + KD大於40"),
-        ("s2", "【策略二】60分K MACD負值減少 + KD大於40"),
-        ("s3", "【策略三】日K MACD大於0 + KD大於20"),
+        ("s1", "【策略一】30分K MACD負值減少 + KD大於50"),
+        ("s2", "【策略二】60分K MACD負值減少 + KD大於50"),
+        ("s3", "【策略三】日K MACD大於0 + KD大於30"),
         ("s4", "【策略四】週K MACD大於0 + KD大於50"),
         ("s5", "【策略五】月K MACD大於0 + KD大於50"),
     ]
