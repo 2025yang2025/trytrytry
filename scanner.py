@@ -3,8 +3,8 @@
 # 台股 6 大策略選股 Pro v2.1 MTF
 #
 # 策略：
-# S1：30K MACD 綠柱縮小 + KD > 50
-# S2：60K MACD 綠柱縮小 + KD > 50
+# S1：30K MACD 綠柱縮小 + KD > 30
+# S2：60K MACD 綠柱縮小 + KD > 30
 # S3：日K MACD > 0 + KD > 20
 # S4：週K MACD 最近突破0軸 + MACD > 0 + KD > 50
 # S5：月K MACD 最近突破0軸 + MACD > 0 + KD > 50
@@ -32,7 +32,10 @@ warnings.filterwarnings("ignore")
 # ==============================================================================
 VERSION = "Pro v2.1 MTF"
 
-TWSE_API_URL = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
+TWSE_API_URLS = [
+    "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL",
+    "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_d"
+]
 
 REQUEST_HEADERS = {
     "User-Agent": (
@@ -49,8 +52,8 @@ MIN_AVG_VOLUME_20 = 1_000_000  # 20日平均成交量門檻 (股)
 DAILY_CHUNK_SIZE = 150
 INTRADAY_CHUNK_SIZE = 50
 
-# 30K / 60K KD 門檻
-INTRADAY_KD_THRESHOLD = 50
+# 30K / 60K KD 門檻 (已調整為 30)
+INTRADAY_KD_THRESHOLD = 30
 
 # 日/週/月 KD 門檻
 DAILY_KD_THRESHOLD = 20
@@ -114,23 +117,17 @@ def get_stock_label(code: str, name: Optional[str] = None) -> str:
     return code
 
 # ==============================================================================
-# TWSE 股票清單取得
+# TWSE 股票清單取得 (含備用機制)
 # ==============================================================================
 def fetch_all_taiwan_market_tickers() -> pd.DataFrame:
-    # 嘗試 API 1: TWSE OpenAPI STOCK_DAY_ALL
-    url_1 = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
-    # 嘗試 API 2: TWSE 備用 OpenAPI (BWIBBU_d 包含所有上市個股代號)
-    url_2 = "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_d"
-    
-    for url in [url_1, url_2]:
+    for url in TWSE_API_URLS:
         try:
-            response = requests.get(url, headers=REQUEST_HEADERS, timeout=15)
+            response = requests.get(url, headers=REQUEST_HEADERS, timeout=15, verify=False)
             if response.status_code == 200:
                 data = response.json()
                 if data and isinstance(data, list):
                     df = pd.DataFrame(data)
                     
-                    # 相容不同的 API 欄位名稱
                     code_col = next((c for c in ['證券代號', 'Code', 'code'] if c in df.columns), None)
                     name_col = next((c for c in ['證券名稱', 'Name', 'name'] if c in df.columns), None)
                     
@@ -142,11 +139,10 @@ def fetch_all_taiwan_market_tickers() -> pd.DataFrame:
                             df["name"] = ""
                             
                         df["code"] = df["code"].astype(str).str.strip()
-                        # 只篩選 4 碼純數字的普通股
                         df = df[df["code"].str.match(r"^\d{4}$", na=False)].copy()
                         
                         if not df.empty:
-                            print(f"✅ 成功從 {url.split('/')[-1]} 取得 {len(df)} 檔股票資訊")
+                            print(f"✅ 成功自 TWSE 取得 {len(df)} 檔股票資訊")
                             return df
         except Exception as e:
             print(f"⚠️ 嘗試讀取 {url} 失敗: {e}")
@@ -224,7 +220,6 @@ def normalize_dataframe(data: pd.DataFrame, ticker: str) -> pd.DataFrame:
 # 重採樣 週K / 月K
 # ==============================================================================
 def resample_klines(df: pd.DataFrame, rule: str) -> pd.DataFrame:
-    """將日 K 線資料重採樣為 週K ('W') 或 月K ('ME' 或 'M')"""
     if df.empty:
         return pd.DataFrame()
 
@@ -518,13 +513,13 @@ def scan_stock(
     m60_df: pd.DataFrame,
 ) -> Optional[Dict[str, Any]]:
     try:
-        # S1: 30K
+        # S1: 30K (使用新的 INTRADAY_KD_THRESHOLD = 30)
         s1_data = check_macd_negative_reducing_kd(
             m30_df, INTRADAY_KD_THRESHOLD
         )
         s1 = s1_data["pass"]
 
-        # S2: 60K
+        # S2: 60K (使用新的 INTRADAY_KD_THRESHOLD = 30)
         s2_data = check_macd_negative_reducing_kd(
             m60_df, INTRADAY_KD_THRESHOLD
         )
@@ -815,14 +810,14 @@ def build_telegram_report(results: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 # ==============================================================================
-# 主程式 (已完整補齊與修復)
+# 主程式
 # ==============================================================================
 def main():
     print("=" * 70)
     print(f"🇹🇼 台股 6 大策略選股 {VERSION}")
     print("=" * 70)
-    print("📌 S1：30K MACD 綠柱縮小 + KD > 50")
-    print("📌 S2：60K MACD 綠柱縮小 + KD > 50")
+    print("📌 S1：30K MACD 綠柱縮小 + KD > 30")
+    print("📌 S2：60K MACD 綠柱縮小 + KD > 30")
     print("📌 S3：日K MACD > 0 + KD > 20")
     print("📌 S4：週K突破0 + KD > 50")
     print("📌 S5：月K突破0 + KD > 50")
@@ -832,8 +827,14 @@ def main():
     # 1. 取得全市場股票代碼與名稱
     market_df = fetch_all_taiwan_market_tickers()
     if market_df.empty:
-        print("❌ 無法取得 TWSE 股票清單")
-        return
+        print("⚠️ 無法連線至 TWSE API，啟用備用常態關注台股清單...")
+        backup_codes = [
+            "2330", "2317", "2454", "2308", "2382", "3231", "2357", "6669",
+            "2303", "2881", "2882", "2891", "2886", "5880", "2884", "2885",
+            "2603", "2609", "2615", "2002", "1301", "1303", "2408", "3037",
+            "3035", "2379", "3661", "3443", "6415", "2345", "6274", "3324"
+        ]
+        market_df = pd.DataFrame({"code": backup_codes, "name": [""] * len(backup_codes)})
 
     print(f"📊 市場股票總數：{len(market_df)}")
 
@@ -844,7 +845,7 @@ def main():
 
     codes = market_df["code"].astype(str).tolist()
 
-    # 2. 第一階段：日 K 線次選過濾 (過濾流動性與基礎指標)
+    # 2. 第一階段：日 K 線次選過濾
     daily_candidates = {}
     total = len(codes)
     print("\n🔎 第一階段：進行日 K 線批次下載與篩選...")
@@ -866,12 +867,10 @@ def main():
             if df.empty or len(df) < 60:
                 continue
 
-            # 成交量門檻過濾 (以 20 日平均成交股數計算)
             avg_volume = df["volume"].tail(20).mean()
             if np.isnan(avg_volume) or avg_volume < MIN_AVG_VOLUME_20:
                 continue
 
-            # 保存通過日 K 基礎門檻的股票
             daily_candidates[code] = df
 
     print(f"✅ 日 K 第一階段初選完成，符合流動性門檻股票數：{len(daily_candidates)} 檔")
@@ -880,7 +879,6 @@ def main():
         print("❌ 沒有符合基礎門檻的股票，程式結束。")
         return
 
-    # 限縮盤中分時掃描數量，避免被 Yahoo API 限流
     candidate_codes = list(daily_candidates.keys())[:INTRADAY_SCAN_LIMIT]
 
     # 3. 第二階段：下載 30K 及 60K 分時資料並完成全週期掃描
@@ -897,7 +895,6 @@ def main():
             f"📥 下載分時 K 線：{start + 1}-{min(start + INTRADAY_CHUNK_SIZE, intraday_total)}/{intraday_total}"
         )
 
-        # 批次下載 30m 與 60m
         data_30m = safe_download_yf(tickers, period="1mo", interval="30m")
         data_60m = safe_download_yf(tickers, period="1mo", interval="60m")
 
@@ -906,7 +903,6 @@ def main():
             m30_df = normalize_dataframe(data_30m, ticker)
             m60_df = normalize_dataframe(data_60m, ticker)
 
-            # 將日 K 重採樣出 週 K 與 月 K (節省 API 請求次數)
             weekly_df = resample_klines(daily_df, "W")
             monthly_df = resample_klines(daily_df, "ME")
 
