@@ -31,12 +31,10 @@ def fetch_all_taiwan_market_tickers():
     return sorted(list(set(all_tickers)))
 
 # ==============================================================================
-# 🛡️ 安全分批下載模組（解決 Connection timed out / Rate limit 問題）
+# 🛡️ 安全分批下載模組
 # ==============================================================================
-def safe_download_yf(tickers, period, interval, chunk_size=200):
-    """
-    分批安全下載 yfinance 資料，避免一次請求上千檔導致 Timeout 或被鎖 IP
-    """
+def safe_download_yf(tickers, period, interval, chunk_size=250):
+    """ 分批安全下載 yfinance 資料 """
     all_dfs = []
     total_chunks = (len(tickers) + chunk_size - 1) // chunk_size
 
@@ -44,7 +42,6 @@ def safe_download_yf(tickers, period, interval, chunk_size=200):
         chunk = tickers[i:i + chunk_size]
         current_chunk = (i // chunk_size) + 1
         
-        # 進行最多 2 次重試機制
         for attempt in range(2):
             try:
                 df = yf.download(
@@ -57,16 +54,15 @@ def safe_download_yf(tickers, period, interval, chunk_size=200):
                 )
                 if not df.empty:
                     all_dfs.append(df)
-                break  # 下載成功，跳出重試迴圈
+                break
             except Exception as e:
                 if attempt == 1:
                     print(f"⚠️ 批次 {current_chunk}/{total_chunks} 下載失敗: {e}")
-                time.sleep(1) # 重試前緩衝
+                time.sleep(1)
 
-        time.sleep(0.3)  # 每次分批間隔 0.3 秒，避免觸發 Yahoo 限流
+        time.sleep(0.3)
 
     if all_dfs:
-        # 將分批下載的 DataFrame 合併
         return pd.concat(all_dfs, axis=1)
     return pd.DataFrame()
 
@@ -91,32 +87,23 @@ def calculate_kd(df_single, n=9, m1=3, m2=3):
         d_list.append((d_list[-1] * (m2 - 1) + k_list[-1]) / m2)
     return pd.Series(k_list, index=df_single.index), pd.Series(d_list, index=df_single.index)
 
-def calculate_rsi(close_series, period=6):
-    delta = close_series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    return (100 - (100 / (1 + (gain / loss)))).fillna(50)
-
 # ==============================================================================
 # 🎯 策略判斷邏輯
 # ==============================================================================
-def check_macd_kd_threshold(df_tf, kd_threshold=20, macd_above_zero=False):
-    """
-    通用模組：判斷 MACD 與 KD 條件
-    """
+def check_macd_negative_reducing_kd(df_tf, kd_threshold=20):
+    """ 策略一 / 二：MACD 負值減少（負柱狀體向上收斂） + KD > kd_threshold """
     try:
         if df_tf.empty or len(df_tf) < 30: return False, 0.0
         c_tf = df_tf['Close'].squeeze().astype(float)
 
         macd_line, signal_line, hist = calculate_macd(c_tf)
         
-        if macd_above_zero:
-            is_macd_cond = macd_line.iloc[-1] > 0
-        else:
-            is_macd_up = (macd_line.iloc[-1] > macd_line.iloc[-2]) and (macd_line.iloc[-1] >= macd_line.iloc[-3])
-            is_macd_towards_zero = (macd_line.iloc[-1] >= -0.5) or (hist.iloc[-1] > 0)
-            is_macd_cond = is_macd_up and is_macd_towards_zero
+        # 條件 1: MACD 負值減少（柱狀圖小於 0 但比上一根大，或快線小於 0 但在上升）
+        is_hist_negative_reducing = (hist.iloc[-1] < 0) and (hist.iloc[-1] > hist.iloc[-2])
+        is_macd_negative_up = (macd_line.iloc[-1] < 0) and (macd_line.iloc[-1] > macd_line.iloc[-2])
+        is_macd_cond = is_hist_negative_reducing or is_macd_negative_up
 
+        # 條件 2: KD > kd_threshold
         k_ser, d_ser = calculate_kd(df_tf)
         is_kd_cond = (k_ser.iloc[-1] > kd_threshold) and (d_ser.iloc[-1] > kd_threshold)
 
@@ -125,72 +112,25 @@ def check_macd_kd_threshold(df_tf, kd_threshold=20, macd_above_zero=False):
     except: pass
     return False, 0.0
 
-def check_strat_orig_4(df_daily):
-    """ 原策略四：主力突破月線 """
+def check_macd_above_zero_kd(df_tf, kd_threshold=20):
+    """ 策略三 / 四 / 五：MACD > 0（快線大於零軸） + KD > kd_threshold """
     try:
-        c_daily = df_daily['Close'].squeeze().astype(float)
-        v_daily = df_daily['Volume'].squeeze().astype(float)
-        o_daily = df_daily['Open'].squeeze().astype(float)
-        
-        ma20 = c_daily.rolling(window=20).mean()
-        v_ma5 = v_daily.rolling(window=5).mean()
+        if df_tf.empty or len(df_tf) < 30: return False, 0.0
+        c_tf = df_tf['Close'].squeeze().astype(float)
 
-        is_break_ma20 = (c_daily.iloc[-1] > ma20.iloc[-1]) and (c_daily.iloc[-2] <= ma20.iloc[-2] or c_daily.iloc[-1] > o_daily.iloc[-1])
-        is_vol_spike = v_daily.iloc[-1] >= (v_ma5.iloc[-2] * 1.5)
+        macd_line, signal_line, hist = calculate_macd(c_tf)
+        is_macd_above_zero = macd_line.iloc[-1] > 0
 
-        k_ser, d_ser = calculate_kd(df_daily)
-        is_kd_up = (k_ser.iloc[-1] > d_ser.iloc[-1]) and (k_ser.iloc[-1] > k_ser.iloc[-2])
+        k_ser, d_ser = calculate_kd(df_tf)
+        is_kd_cond = (k_ser.iloc[-1] > kd_threshold) and (d_ser.iloc[-1] > kd_threshold)
 
-        if is_break_ma20 and is_vol_spike and is_kd_up:
-            return True, c_daily.iloc[-1]
-    except: pass
-    return False, 0.0
-
-def check_strat_orig_5(df_daily):
-    """ 原策略五：關鍵均線多頭突破 × 量能倍增 """
-    try:
-        if df_daily.empty or len(df_daily) < 20: return False, 0.0
-        
-        c_daily = df_daily['Close'].squeeze().astype(float)
-        v_daily = df_daily['Volume'].squeeze().astype(float)
-        
-        ma20 = c_daily.rolling(window=20).mean()
-        close_today = c_daily.iloc[-1]
-        close_yesterday = c_daily.iloc[-2]
-        ma20_today = ma20.iloc[-1]
-        ma20_yesterday = ma20.iloc[-2]
-        
-        price_break_cond = (close_today > ma20_today) and (close_yesterday <= ma20_yesterday or (close_today - close_yesterday) / close_yesterday > 0.02)
-        if not price_break_cond: return False, 0.0
-        
-        v_ma5 = v_daily.rolling(window=5).mean().iloc[-1]
-        volume_today = v_daily.iloc[-1]
-        volume_cond = volume_today > (v_ma5 * 1.5)
-        if not volume_cond: return False, 0.0
-        
-        k_series, d_series = calculate_kd(df_daily)
-        k_today = k_series.iloc[-1]
-        d_today = d_series.iloc[-1]
-        kd_cond = (k_today > d_today) and (k_today < 75)
-        
-        if kd_cond:
-            return True, close_today
-    except Exception:
-        pass
-    return False, 0.0
-
-def check_strat_orig_7(df_daily):
-    """ 原策略七：短線極限超賣 × 爆量紅K """
-    try:
-        c_daily = df_daily['Close'].squeeze().astype(float)
-        rsi6 = calculate_rsi(c_daily, period=6).iloc[-1]
-        if rsi6 < 20 and c_daily.iloc[-1] > df_daily['Open'].squeeze().astype(float).iloc[-1] and df_daily['Volume'].squeeze().astype(float).iloc[-1] > df_daily['Volume'].squeeze().astype(float).rolling(5).mean().iloc[-1]:
-            return True, c_daily.iloc[-1]
+        if is_macd_above_zero and is_kd_cond:
+            return True, c_tf.iloc[-1]
     except: pass
     return False, 0.0
 
 def check_strat_orig_8(df_daily):
-    """ 原策略八：低檔爆量股 """
+    """ 策略六（原策略八）：低檔爆量股 """
     try:
         c_daily = df_daily['Close'].squeeze().astype(float)
         v_daily = df_daily['Volume'].squeeze().astype(float)
@@ -214,12 +154,9 @@ def check_strat_orig_8(df_daily):
     return False, 0.0
 
 # ==============================================================================
-# 💬 Telegram 發送模組
+# 💬 Telegram 發送模組 (含長訊息自動切分)
 # ==============================================================================
 def send_telegram_message(message, max_length=3500):
-    """
-    發送 Telegram 訊息，若內容超過長度限制則自動拆分多封發送
-    """
     bot_token = os.environ.get("TG_BOT_TOKEN")
     chat_id = os.environ.get("TG_CHAT_ID")
     
@@ -229,7 +166,6 @@ def send_telegram_message(message, max_length=3500):
 
     url = f"https://api.telegram.org/bot{str(bot_token).strip()}/sendMessage"
 
-    # 按換行符拆分，確保 HTML 標籤不會在半空中被切斷
     lines = message.split('\n')
     chunks = []
     current_chunk = ""
@@ -243,7 +179,6 @@ def send_telegram_message(message, max_length=3500):
     if current_chunk:
         chunks.append(current_chunk)
 
-    # 依序發送拆分後的訊息
     for idx, chunk in enumerate(chunks, 1):
         payload = {
             "chat_id": str(chat_id).strip(),
@@ -259,8 +194,7 @@ def send_telegram_message(message, max_length=3500):
                 print(f"❌ Telegram 發送失敗 (HTTP {res.status_code}): {res_json}")
         except Exception as e:
             print(f"❌ Telegram 發送連線異常: {e}")
-            
-        time.sleep(0.5) # 避開 Telegram 發送頻率限制
+        time.sleep(0.5)
 
 # ==============================================================================
 # 🚀 主程式
@@ -270,19 +204,18 @@ if __name__ == "__main__":
     now_tw = pd.Timestamp.now(tz='UTC').tz_convert('Asia/Taipei')
     tw_time_str = now_tw.strftime('%Y-%m-%d %H:%M:%S')
 
-    print("🚀 啟動【台股全新 8 大策略選股系統】...")
+    print("🚀 啟動【台股 6 大策略精準選股系統】...")
     tech_scan_pool = fetch_all_taiwan_market_tickers()
 
-    print(f"⏳ 步驟 1: 安全分批下載全市場日K與週K資料 (共 {len(tech_scan_pool)} 檔)...")
-    # 每批次下載 250 檔，避免連線逾時
+    print(f"⏳ 步驟 1: 下載全市場日K、週K與月K資料 (共 {len(tech_scan_pool)} 檔)...")
     full_df_daily = safe_download_yf(tech_scan_pool, period="1y", interval="1d", chunk_size=250)
     full_df_weekly = safe_download_yf(tech_scan_pool, period="2y", interval="1wk", chunk_size=250)
+    full_df_monthly = safe_download_yf(tech_scan_pool, period="5y", interval="1mo", chunk_size=250)
 
-    # 初始化 1 ~ 8 策略結果清單
-    strat1, strat2, strat3, strat4, strat5, strat6, strat7, strat8 = [], [], [], [], [], [], [], []
+    strat1, strat2, strat3, strat4, strat5, strat6 = [], [], [], [], [], []
     heavy_scan_pool = []
 
-    print("⏳ 步驟 2: 進行日K、週K相關策略篩選...")
+    print("⏳ 步驟 2: 進行日K、週K、月K策略篩選...")
     for ticker in tech_scan_pool:
         try:
             if ticker not in full_df_daily.columns.levels[1]: continue
@@ -295,37 +228,29 @@ if __name__ == "__main__":
             name_zh = DYNAMIC_STOCK_NAMES.get(ticker, "")
             stock_label = f"<code>{ticker}</code>(<i>{name_zh}</i>)" if name_zh else f"<code>{ticker}</code>"
 
-            # 🛠️ 【策略三：日K MACD趨向0軸向上 + KD > 50】
-            res3, price3 = check_macd_kd_threshold(df_d, kd_threshold=50, macd_above_zero=False)
+            # 🛠️ 【策略三：日K MACD > 0 + KD > 20】
+            res3, price3 = check_macd_above_zero_kd(df_d, kd_threshold=20)
             if res3:
                 strat3.append(f"{stock_label}[{price3:.2f}元]")
 
-            # 🛠️ 【策略四：週K MACD 0軸以上 + KD > 30】
+            # 🛠️ 【策略四：週K MACD > 0 + KD > 50】
             if ticker in full_df_weekly.columns.levels[1]:
                 df_w = full_df_weekly.xs(ticker, axis=1, level=1)
-                res4, price4 = check_macd_kd_threshold(df_w, kd_threshold=30, macd_above_zero=True)
+                res4, price4 = check_macd_above_zero_kd(df_w, kd_threshold=50)
                 if res4:
                     strat4.append(f"{stock_label}[{df_d['Close'].iloc[-1]:.2f}元]")
 
-            # 🛠️ 【策略五：原本策略四 (主力突破月線)】
-            res5, price5 = check_strat_orig_4(df_d)
-            if res5: 
-                strat5.append(f"{stock_label}[{price5:.2f}元]")
+            # 🛠️ 【策略五：月K MACD > 0 + KD > 50】
+            if ticker in full_df_monthly.columns.levels[1]:
+                df_m = full_df_monthly.xs(ticker, axis=1, level=1)
+                res5, price5 = check_macd_above_zero_kd(df_m, kd_threshold=50)
+                if res5:
+                    strat5.append(f"{stock_label}[{df_d['Close'].iloc[-1]:.2f}元]")
 
-            # 🛠️ 【策略六：原本策略五 (關鍵均線多頭突破 × 量能倍增)】
-            res6, price6 = check_strat_orig_5(df_d)
-            if res6: 
+            # 🛠️ 【策略六：原策略八 (低檔爆量股)】
+            res6, price6 = check_strat_orig_8(df_d)
+            if res6:
                 strat6.append(f"{stock_label}[{price6:.2f}元]")
-
-            # 🛠️ 【策略七：原策略七 (短線極限超賣 × 爆量紅K)】
-            res7, price7 = check_strat_orig_7(df_d)
-            if res7: 
-                strat7.append(f"{stock_label}[{price7:.2f}元]")
-
-            # 🛠️ 【策略八：原策略八 (低檔爆量股)】
-            res8, price8 = check_strat_orig_8(df_d)
-            if res8:
-                strat8.append(f"{stock_label}[{price8:.2f}元]")
 
             # 收集適合下載 30m / 60m K線的精選名單
             if df_d['Close'].iloc[-1] > df_d['Close'].rolling(20).mean().iloc[-1]:
@@ -336,7 +261,7 @@ if __name__ == "__main__":
     # ⏳ 步驟 3: 下載 30分K 與 60分K 資料
     final_heavy_pool = heavy_scan_pool[:50]
     if final_heavy_pool:
-        print(f"⏳ 步驟 3: 下載精選 {len(final_heavy_pool)} 檔標的的 30分K 與 60分K 資料...")
+        print(f"⏳ 步驟 3: 下載精選 {len(final_heavy_pool)} 檔標的之 30分K 與 60分K 資料...")
         full_df_30m = safe_download_yf(final_heavy_pool, period="1mo", interval="30m", chunk_size=50)
         full_df_60m = safe_download_yf(final_heavy_pool, period="1mo", interval="60m", chunk_size=50)
 
@@ -345,48 +270,42 @@ if __name__ == "__main__":
                 name_zh = DYNAMIC_STOCK_NAMES.get(ticker, "")
                 stock_label = f"<code>{ticker}</code>(<i>{name_zh}</i>)" if name_zh else f"<code>{ticker}</code>"
 
-                # 🛠️ 【策略一：30分K MACD趨向0軸向上 + KD > 20】
+                # 🛠️ 【策略一：30分K MACD負值減少 + KD > 20】
                 if ticker in full_df_30m.columns.levels[1]:
                     df_m30 = full_df_30m.xs(ticker, axis=1, level=1)
-                    res1, price1 = check_macd_kd_threshold(df_m30, kd_threshold=20, macd_above_zero=False)
+                    res1, price1 = check_macd_negative_reducing_kd(df_m30, kd_threshold=20)
                     if res1: 
                         strat1.append(f"{stock_label}[{price1:.2f}元]")
 
-                # 🛠️ 【策略二：60分K MACD趨向0軸向上 + KD > 20】
+                # 🛠️ 【策略二：60分K MACD負值減少 + KD > 20】
                 if ticker in full_df_60m.columns.levels[1]:
                     df_m60 = full_df_60m.xs(ticker, axis=1, level=1)
-                    res2, price2 = check_macd_kd_threshold(df_m60, kd_threshold=20, macd_above_zero=False)
+                    res2, price2 = check_macd_negative_reducing_kd(df_m60, kd_threshold=20)
                     if res2: 
                         strat2.append(f"{stock_label}[{price2:.2f}元]")
             except: continue
 
-    # 📝 Telegram 報告輸出
-    tw_msg = f"🇹🇼 <b>【台股多策略選股報告】</b>\n⚠️ <i>已過濾 20日均量 &lt; 1000張之殭屍股</i>\n⏰ 時間: {tw_time_str}\n"
+    # 📝 Telegram 報告組裝
+    tw_msg = f"🇹🇼 <b>【台股 6 大多頭選股報告】</b>\n⚠️ <i>已過濾 20日均量 &lt; 1000張之殭屍股</i>\n⏰ 時間: {tw_time_str}\n"
     tw_msg += "───────────────────\n\n"
     
-    tw_msg += "📈 <b>【策略一】30分K MACD趨向0軸向上 + KD &gt; 20</b>\n"
+    tw_msg += "📈 <b>【策略一】30分K MACD負值減少 + KD &gt; 20</b>\n"
     tw_msg += f"↳ {', '.join(strat1) if strat1 else '今日無符合標的。 💤'}\n\n"
 
-    tw_msg += "📊 <b>【策略二】60分K MACD趨向0軸向上 + KD &gt; 20</b>\n"
+    tw_msg += "📊 <b>【策略二】60分K MACD負值減少 + KD &gt; 20</b>\n"
     tw_msg += f"↳ {', '.join(strat2) if strat2 else '今日無符合標的。 💤'}\n\n"
 
-    tw_msg += "📈 <b>【策略三】日K MACD趨向0軸向上 + KD &gt; 50</b>\n"
+    tw_msg += "📈 <b>【策略三】日K MACD &gt; 0 + KD &gt; 20</b>\n"
     tw_msg += f"↳ {', '.join(strat3) if strat3 else '今日無符合標的。 💤'}\n\n"
 
-    tw_msg += "📊 <b>【策略四】週K MACD 0軸以上 + KD &gt; 30</b>\n"
+    tw_msg += "📊 <b>【策略四】週K MACD &gt; 0 + KD &gt; 50</b>\n"
     tw_msg += f"↳ {', '.join(strat4) if strat4 else '今日無符合標的。 💤'}\n\n"
 
-    tw_msg += "🚀 <b>【策略五】主力突破月線 (突破20MA × 成交量>1.5倍5日均量 × KD指南針向上)</b>\n"
+    tw_msg += "🌕 <b>【策略五】月K MACD &gt; 0 + KD &gt; 50</b>\n"
     tw_msg += f"↳ {', '.join(strat5) if strat5 else '今日無符合標的。 💤'}\n\n"
 
-    tw_msg += "⚡ <b>【策略六】關鍵均線多頭突破 × 量能倍增 (帶量突破)</b>\n"
-    tw_msg += f"↳ {', '.join(strat6) if strat6 else '今日無符合標的。 💤'}\n\n"
-
-    tw_msg += "🔥 <b>【策略七】短線極限超賣 × 爆量紅K (恐慌止跌)</b>\n"
-    tw_msg += f"↳ {', '.join(strat7) if strat7 else '今日無符合標的。 💤'}\n\n"
-
-    tw_msg += "💥 <b>【策略八】低檔爆量股 (半年位階 ≤ 30% × 成交量 ≥ 2.5倍5日均量 × 紅K)</b>\n"
-    tw_msg += f"↳ {', '.join(strat8) if strat8 else '今日無符合標的。 💤'}\n"
+    tw_msg += "💥 <b>【策略六】低檔爆量股 (半年位階 ≤ 30% × 成交量 ≥ 2.5倍5日均量 × 紅K)</b>\n"
+    tw_msg += f"↳ {', '.join(strat6) if strat6 else '今日無符合標的。 💤'}\n"
 
     send_telegram_message(tw_msg)
     print(f"✅ 策略報告發送完成！總耗時: {time.time() - start_time:.1f} 秒")
