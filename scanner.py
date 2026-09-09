@@ -1,351 +1,323 @@
-import pandas as pd
-import yfinance as yf
-import requests
-import os
+# scanner.py
+# ==============================================================================
+# 台股 策略選股 Pro v3.0 (分K/日K/週K/月K 多週期)
+#
+# 策略一：30分K MACD 負值減少 + KD > 40
+# 策略二：60分K MACD 負值減少 + KD > 40
+# 策略三：日K MACD > 0 + KD > 20
+# 策略四：週K MACD > 0 + KD > 50
+# 策略五：月K MACD > 0 + KD > 50
+#
+# 顯示格式：代號 中文名稱 最新價格
+# ==============================================================================
+
 import time
+import warnings
+from typing import Dict, Any, List
+
+import numpy as np
+import pandas as pd
+import requests
+import yfinance as yf
+
+warnings.filterwarnings("ignore")
 
 # ==============================================================================
-# 🇹🇼 台股全市場快速資料下載模組
+# 基本設定與 API
 # ==============================================================================
+VERSION = "Pro v3.0 MTF"
+
+TWSE_API_URLS = [
+    "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL",
+    "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_d"
+]
+
+REQUEST_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
+    )
+}
+
+MIN_AVG_VOLUME_20 = 1_000_000  # 20日平均成交量門檻 (股)
+CHUNK_SIZE = 100
+
 DYNAMIC_STOCK_NAMES = {}
 
-def fetch_all_taiwan_market_tickers():
-    """ 下載全台股市場代碼與名稱 """
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-    all_tickers = []
-    
-    try:
-        url_twse = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
-        res = requests.get(url_twse, headers=headers, timeout=10)
-        if res.status_code == 200:
-            for item in res.json():
-                code = item.get("Code", "").strip()
-                name = item.get("Name", "").strip()
-                if code.isdigit() and len(code) == 4:
-                    ticker_id = f"{code}.TW"
-                    all_tickers.append(ticker_id)
-                    DYNAMIC_STOCK_NAMES[ticker_id] = name
-    except Exception as e:
-        print(f"⚠️ 撈取全市場名單異常: {e}")
-
-    return sorted(list(set(all_tickers)))
-
 # ==============================================================================
-# 🛡️ 安全分批下載模組
+# 工具函式
 # ==============================================================================
-def safe_download_yf(tickers, period, interval, chunk_size=250):
-    """ 分批安全下載 yfinance 資料 """
-    all_dfs = []
-    total_chunks = (len(tickers) + chunk_size - 1) // chunk_size
+def get_ticker_code(code: str) -> str:
+    code = str(code).strip()
+    if code.endswith(".TW") or code.endswith(".TWO"):
+        return code
+    return f"{code}.TW"
 
-    for i in range(0, len(tickers), chunk_size):
-        chunk = tickers[i:i + chunk_size]
-        current_chunk = (i // chunk_size) + 1
-        
-        for attempt in range(2):
-            try:
-                df = yf.download(
-                    chunk, 
-                    period=period, 
-                    interval=interval, 
-                    progress=False, 
-                    auto_adjust=True,
-                    threads=True
-                )
-                if not df.empty:
-                    all_dfs.append(df)
-                break
-            except Exception as e:
-                if attempt == 1:
-                    print(f"⚠️ 批次 {current_chunk}/{total_chunks} 下載失敗: {e}")
-                time.sleep(1)
-
-        time.sleep(0.3)
-
-    if all_dfs:
-        return pd.concat(all_dfs, axis=1)
+def fetch_all_taiwan_market_tickers() -> pd.DataFrame:
+    for url in TWSE_API_URLS:
+        try:
+            response = requests.get(url, headers=REQUEST_HEADERS, timeout=15, verify=False)
+            if response.status_code == 200:
+                data = response.json()
+                if data and isinstance(data, list):
+                    df = pd.DataFrame(data)
+                    code_col = next((c for c in ['證券代號', 'Code', 'code'] if c in df.columns), None)
+                    name_col = next((c for c in ['證券名稱', 'Name', 'name'] if c in df.columns), None)
+                    
+                    if code_col:
+                        df = df.rename(columns={code_col: "code"})
+                        df["name"] = df[name_col] if name_col else ""
+                        df["code"] = df["code"].astype(str).str.strip()
+                        df = df[df["code"].str.match(r"^\d{4}$", na=False)].copy()
+                        
+                        if not df.empty:
+                            print(f"✅ 成功自 TWSE 取得 {len(df)} 檔股票資訊")
+                            return df
+        except Exception as e:
+            print(f"⚠️ 嘗試讀取 {url} 失敗: {e}")
+            
+    print("❌ 無法取得 TWSE 股票清單")
     return pd.DataFrame()
 
-# ==============================================================================
-# 📊 技術指標算術模組（嚴謹修正版）
-# ==============================================================================
-def calculate_macd(close_series, fast=12, slow=26, signal=9):
-    fast_ema = close_series.ewm(span=fast, adjust=False).mean()
-    slow_ema = close_series.ewm(span=slow, adjust=False).mean()
-    macd_line = fast_ema - slow_ema
-    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
-    return macd_line, signal_line, macd_line - signal_line
+def safe_download_yf(tickers: List[str], period: str, interval: str, retries: int = 2) -> pd.DataFrame:
+    if not tickers:
+        return pd.DataFrame()
 
-def calculate_kd(df_single, n=9, m1=3, m2=3):
-    """ 嚴謹計算 KD 值，確保傳回正確對齊的 Series """
-    df_clean = df_single[['High', 'Low', 'Close']].dropna().astype(float)
-    if len(df_clean) < n:
-        return pd.Series(dtype=float), pd.Series(dtype=float)
+    for attempt in range(retries):
+        try:
+            data = yf.download(
+                tickers=tickers,
+                period=period,
+                interval=interval,
+                auto_adjust=False,
+                progress=False,
+                group_by="ticker",
+                threads=True,
+            )
+            if data is not None and not data.empty:
+                return data
+        except Exception:
+            time.sleep(1)
 
-    low_min = df_clean['Low'].rolling(window=n).min()
-    high_max = df_clean['High'].rolling(window=n).max()
-    close = df_clean['Close']
-    
-    denom = high_max - low_min
-    rsv = (((close - low_min) / denom) * 100).fillna(50)
-    
-    k_vals = []
-    d_vals = []
-    k_prev, d_prev = 50.0, 50.0
-    
-    for val in rsv:
-        k_curr = (k_prev * (m1 - 1) + val) / m1
-        d_curr = (d_prev * (m2 - 1) + k_curr) / m2
-        k_vals.append(k_curr)
-        d_vals.append(d_curr)
-        k_prev, d_prev = k_curr, d_curr
-        
-    return pd.Series(k_vals, index=df_clean.index), pd.Series(d_vals, index=df_clean.index)
+    return pd.DataFrame()
 
-# ==============================================================================
-# 🎯 策略判斷邏輯（精準無漏驗版）
-# ==============================================================================
-def check_macd_negative_reducing_kd(df_tf, kd_threshold=20):
-    """ 策略一 / 二：MACD 負值減少 + KD > kd_threshold """
+def normalize_dataframe(data: pd.DataFrame, ticker: str) -> pd.DataFrame:
+    if data is None or data.empty:
+        return pd.DataFrame()
+
     try:
-        df_clean = df_tf.dropna(subset=['Close', 'High', 'Low'])
-        if len(df_clean) < 30: return False, 0.0
-        c_tf = df_clean['Close'].astype(float)
+        if isinstance(data.columns, pd.MultiIndex):
+            if ticker in data.columns.get_level_values(0):
+                df = data[ticker].copy()
+            elif ticker in data.columns.get_level_values(1):
+                df = data.xs(ticker, axis=1, level=1).copy()
+            else:
+                df = data.copy()
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.get_level_values(-1)
+        else:
+            df = data.copy()
 
-        macd_line, signal_line, hist = calculate_macd(c_tf)
-        
-        # 條件 1: MACD 負值減少
-        is_hist_negative_reducing = (hist.iloc[-1] < 0) and (hist.iloc[-1] > hist.iloc[-2])
-        is_macd_negative_up = (macd_line.iloc[-1] < 0) and (macd_line.iloc[-1] > macd_line.iloc[-2])
-        is_macd_cond = is_hist_negative_reducing or is_macd_negative_up
+        df.columns = [str(c).lower() for c in df.columns]
+        required = ["open", "high", "low", "close", "volume"]
 
-        # 條件 2: KD > kd_threshold
-        k_ser, d_ser = calculate_kd(df_clean)
-        if k_ser.empty or d_ser.empty: return False, 0.0
-        
-        k_val = k_ser.iloc[-1]
-        d_val = d_ser.iloc[-1]
-        is_kd_cond = (k_val > kd_threshold) and (d_val > kd_threshold)
+        for col in required:
+            if col not in df.columns:
+                return pd.DataFrame()
 
-        if is_macd_cond and is_kd_cond:
-            return True, c_tf.iloc[-1]
-    except Exception as e:
-        pass
-    return False, 0.0
+        df = df[required].copy()
+        for col in required:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
 
-def check_macd_above_zero_kd(df_tf, kd_threshold=20):
-    """ 策略三 / 四 / 五：MACD > 0 + KD > kd_threshold """
-    try:
-        df_clean = df_tf.dropna(subset=['Close', 'High', 'Low'])
-        if len(df_clean) < 30: return False, 0.0
-        c_tf = df_clean['Close'].astype(float)
+        df = df.dropna(subset=["close"])
+        return df
+    except Exception:
+        return pd.DataFrame()
 
-        # 檢查 MACD > 0
-        macd_line, signal_line, hist = calculate_macd(c_tf)
-        macd_val = macd_line.iloc[-1]
-        if pd.isna(macd_val) or macd_val <= 0:
-            return False, 0.0
+def resample_klines(df: pd.DataFrame, rule: str) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame()
 
-        # 檢查 KD 雙線 > kd_threshold
-        k_ser, d_ser = calculate_kd(df_clean)
-        if k_ser.empty or d_ser.empty: return False, 0.0
-        
-        k_val = k_ser.iloc[-1]
-        d_val = d_ser.iloc[-1]
-        
-        if pd.isna(k_val) or pd.isna(d_val):
-            return False, 0.0
-
-        # 嚴格驗證：K 與 D 均須大於指定門檻
-        if (k_val > kd_threshold) and (d_val > kd_threshold):
-            return True, c_tf.iloc[-1]
-    except Exception as e:
-        pass
-    return False, 0.0
-
-def check_strat_orig_8(df_daily):
-    """ 策略六：低檔爆量股 """
-    try:
-        df_clean = df_daily.dropna(subset=['Close', 'High', 'Low', 'Open', 'Volume'])
-        if len(df_clean) < 120: return False, 0.0
-        
-        c_daily = df_clean['Close'].astype(float)
-        v_daily = df_clean['Volume'].astype(float)
-        o_daily = df_clean['Open'].astype(float)
-
-        low_120 = c_daily.rolling(window=120).min().iloc[-1]
-        high_120 = c_daily.rolling(window=120).max().iloc[-1]
-        if high_120 == low_120 or pd.isna(low_120) or pd.isna(high_120): return False, 0.0
-
-        price_position = (c_daily.iloc[-1] - low_120) / (high_120 - low_120)
-        is_low_position = price_position <= 0.30
-
-        v_ma5_prev = v_daily.rolling(window=5).mean().iloc[-2]
-        is_volume_surge = (v_daily.iloc[-1] >= v_ma5_prev * 2.5) if v_ma5_prev > 0 else False
-
-        is_red_k = c_daily.iloc[-1] > o_daily.iloc[-1]
-
-        if is_low_position and is_volume_surge and is_red_k:
-            return True, c_daily.iloc[-1]
-    except Exception as e:
-        pass
-    return False, 0.0
+    resampled = df.resample(rule).agg(
+        {
+            "open": "first",
+            "high": "max",
+            "low": "min",
+            "close": "last",
+            "volume": "sum",
+        }
+    )
+    return resampled.dropna(subset=["close"])
 
 # ==============================================================================
-# 💬 Telegram 發送模組
+# 技術指標計算與選股邏輯
 # ==============================================================================
-def send_telegram_message(message, max_length=3500):
-    bot_token = os.environ.get("TG_BOT_TOKEN")
-    chat_id = os.environ.get("TG_CHAT_ID")
+def calculate_macd(close: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9):
+    ema_fast = close.ewm(span=fast, adjust=False).mean()
+    ema_slow = close.ewm(span=slow, adjust=False).mean()
+    macd = ema_fast - ema_slow
+    signal_line = macd.ewm(span=signal, adjust=False).mean()
+    hist = macd - signal_line
+    return macd, signal_line, hist
+
+def calculate_kd(df: pd.DataFrame, period: int = 9, k_period: int = 3, d_period: int = 3):
+    low_min = df["low"].rolling(period).min()
+    high_max = df["high"].rolling(period).max()
+    denominator = high_max - low_min
+
+    rsv = (df["close"] - low_min) / denominator.replace(0, np.nan) * 100
+    k = rsv.ewm(alpha=1 / k_period, adjust=False).mean()
+    d = k.ewm(alpha=1 / d_period, adjust=False).mean()
+    return k, d
+
+def is_macd_hist_negative_reducing(hist: pd.Series) -> bool:
+    """判斷 MACD 柱狀體是否為負值且正在減少 (負值收斂)"""
+    if len(hist) < 2:
+        return False
+    # 最新一根柱狀體為負，且數值大於前一根 (例：-0.5 > -1.2)
+    return (hist.iloc[-1] < 0) and (hist.iloc[-1] > hist.iloc[-2])
+
+# ==============================================================================
+# 策略邏輯檢測
+# ==============================================================================
+def check_strategy_1(df_30m: pd.DataFrame) -> bool:
+    """【策略一】30分K MACD負值減少 + KD > 40"""
+    if df_30m.empty or len(df_30m) < 35:
+        return False
+    _, _, hist = calculate_macd(df_30m["close"])
+    k, _ = calculate_kd(df_30m)
+    return is_macd_hist_negative_reducing(hist) and (k.iloc[-1] > 40)
+
+def check_strategy_2(df_60m: pd.DataFrame) -> bool:
+    """【策略二】60分K MACD負值減少 + KD > 40"""
+    if df_60m.empty or len(df_60m) < 35:
+        return False
+    _, _, hist = calculate_macd(df_60m["close"])
+    k, _ = calculate_kd(df_60m)
+    return is_macd_hist_negative_reducing(hist) and (k.iloc[-1] > 40)
+
+def check_strategy_3(df_daily: pd.DataFrame) -> bool:
+    """【策略三】日K MACD > 0 + KD > 20"""
+    if df_daily.empty or len(df_daily) < 35:
+        return False
+    macd, _, _ = calculate_macd(df_daily["close"])
+    k, _ = calculate_kd(df_daily)
+    return (macd.iloc[-1] > 0) and (k.iloc[-1] > 20)
+
+def check_strategy_4(df_weekly: pd.DataFrame) -> bool:
+    """【策略四】週K MACD > 0 + KD > 50"""
+    if df_weekly.empty or len(df_weekly) < 35:
+        return False
+    macd, _, _ = calculate_macd(df_weekly["close"])
+    k, _ = calculate_kd(df_weekly)
+    return (macd.iloc[-1] > 0) and (k.iloc[-1] > 50)
+
+def check_strategy_5(df_monthly: pd.DataFrame) -> bool:
+    """【策略五】月K MACD > 0 + KD > 50"""
+    if df_monthly.empty or len(df_monthly) < 35:
+        return False
+    macd, _, _ = calculate_macd(df_monthly["close"])
+    k, _ = calculate_kd(df_monthly)
+    return (macd.iloc[-1] > 0) and (k.iloc[-1] > 50)
+
+# ==============================================================================
+# 主程式
+# ==============================================================================
+def main():
+    print(f"🚀 開始執行 台股策略選股 {VERSION}")
     
-    if not bot_token or not chat_id:
-        print("❌ 錯誤：未設定 TG_BOT_TOKEN 或 TG_CHAT_ID 環境變數！")
+    df_tickers = fetch_all_taiwan_market_tickers()
+    if df_tickers.empty:
+        print("❌ 無法取得標的，程式結束。")
         return
 
-    url = f"https://api.telegram.org/bot{str(bot_token).strip()}/sendMessage"
+    codes = df_tickers["code"].tolist()
+    for _, row in df_tickers.iterrows():
+        DYNAMIC_STOCK_NAMES[row["code"]] = row.get("name", "")
 
-    lines = message.split('\n')
-    chunks = []
-    current_chunk = ""
+    yf_tickers = [get_ticker_code(c) for c in codes]
+    all_results = []
 
-    for line in lines:
-        if len(current_chunk) + len(line) + 1 > max_length:
-            chunks.append(current_chunk)
-            current_chunk = line + "\n"
-        else:
-            current_chunk += line + "\n"
-    if current_chunk:
-        chunks.append(current_chunk)
+    print(f"📥 開始掃描 {len(yf_tickers)} 檔股票資料...")
 
-    for idx, chunk in enumerate(chunks, 1):
-        payload = {
-            "chat_id": str(chat_id).strip(),
-            "text": chunk.strip(),
-            "parse_mode": "HTML"
-        }
-        try:
-            res = requests.post(url, json=payload, timeout=10)
-            res_json = res.json()
-            if res.status_code == 200 and res_json.get("ok"):
-                print(f"✅ Telegram 訊息段落 ({idx}/{len(chunks)}) 發送成功！")
-            else:
-                print(f"❌ Telegram 發送失敗 (HTTP {res.status_code}): {res_json}")
-        except Exception as e:
-            print(f"❌ Telegram 發送連線異常: {e}")
-        time.sleep(0.5)
+    for i in range(0, len(yf_tickers), CHUNK_SIZE):
+        chunk = yf_tickers[i:i + CHUNK_SIZE]
+        
+        # 1. 下載日 K 資料 (計算策略 3, 4, 5)
+        raw_daily = safe_download_yf(chunk, period="2y", interval="1d")
+        # 2. 下載分 K 資料 (計算策略 1, 2)
+        raw_30m = safe_download_yf(chunk, period="1mo", interval="30m")
+        raw_60m = safe_download_yf(chunk, period="1mo", interval="60m")
 
-# ==============================================================================
-# 🚀 主程式
-# ==============================================================================
-if __name__ == "__main__":
-    start_time = time.time()
-    now_tw = pd.Timestamp.now(tz='UTC').tz_convert('Asia/Taipei')
-    tw_time_str = now_tw.strftime('%Y-%m-%d %H:%M:%S')
-
-    print("🚀 啟動【台股 6 大策略精準選股系統】...")
-    tech_scan_pool = fetch_all_taiwan_market_tickers()
-
-    print(f"⏳ 步驟 1: 下載全市場日K、週K與月K資料 (共 {len(tech_scan_pool)} 檔)...")
-    full_df_daily = safe_download_yf(tech_scan_pool, period="1y", interval="1d", chunk_size=250)
-    full_df_weekly = safe_download_yf(tech_scan_pool, period="2y", interval="1wk", chunk_size=250)
-    full_df_monthly = safe_download_yf(tech_scan_pool, period="5y", interval="1mo", chunk_size=250)
-
-    strat1, strat2, strat3, strat4, strat5, strat6 = [], [], [], [], [], []
-    heavy_scan_pool = []
-
-    print("⏳ 步驟 2: 進行日K、週K、月K策略篩選...")
-    for ticker in tech_scan_pool:
-        try:
-            if ticker not in full_df_daily.columns.levels[1]: continue
-            df_d = full_df_daily.xs(ticker, axis=1, level=1)
-            if df_d.empty or len(df_d.dropna(subset=['Close'])) < 120: continue 
+        for t_code in chunk:
+            code = t_code.replace(".TW", "").replace(".TWO", "")
+            df_d = normalize_dataframe(raw_daily, t_code)
             
-            # 核心防線：20日均量 >= 1000張
-            if df_d['Volume'].rolling(window=20).mean().iloc[-1] / 1000 < 1000: continue
-
-            name_zh = DYNAMIC_STOCK_NAMES.get(ticker, "")
-            stock_label = f"<code>{ticker}</code>(<i>{name_zh}</i>)" if name_zh else f"<code>{ticker}</code>"
-
-            # 🛠️ 【策略三：日K MACD > 0 + KD > 20】
-            res3, price3 = check_macd_above_zero_kd(df_d, kd_threshold=20)
-            if res3:
-                strat3.append(f"{stock_label}[{price3:.2f}元]")
-
-            # 🛠️ 【策略四：週K MACD > 0 + KD > 50】
-            if ticker in full_df_weekly.columns.levels[1]:
-                df_w = full_df_weekly.xs(ticker, axis=1, level=1)
-                res4, price4 = check_macd_above_zero_kd(df_w, kd_threshold=50)
-                if res4:
-                    strat4.append(f"{stock_label}[{df_d['Close'].dropna().iloc[-1]:.2f}元]")
-
-            # 🛠️ 【策略五：月K MACD > 0 + KD > 50】
-            if ticker in full_df_monthly.columns.levels[1]:
-                df_m = full_df_monthly.xs(ticker, axis=1, level=1)
-                res5, price5 = check_macd_above_zero_kd(df_m, kd_threshold=50)
-                if res5:
-                    strat5.append(f"{stock_label}[{df_d['Close'].dropna().iloc[-1]:.2f}元]")
-
-            # 🛠️ 【策略六：低檔爆量股】
-            res6, price6 = check_strat_orig_8(df_d)
-            if res6:
-                strat6.append(f"{stock_label}[{price6:.2f}元]")
-
-            # 收集適合下載 30m / 60m K線的精選名單
-            if df_d['Close'].dropna().iloc[-1] > df_d['Close'].rolling(20).mean().iloc[-1]:
-                heavy_scan_pool.append(ticker)
-
-        except Exception as e:
-            continue
-
-    # ⏳ 步驟 3: 下載 30分K 與 60分K 資料
-    final_heavy_pool = heavy_scan_pool[:50]
-    if final_heavy_pool:
-        print(f"⏳ 步驟 3: 下載精選 {len(final_heavy_pool)} 檔標的之 30分K 與 60分K 資料...")
-        full_df_30m = safe_download_yf(final_heavy_pool, period="1mo", interval="30m", chunk_size=50)
-        full_df_60m = safe_download_yf(final_heavy_pool, period="1mo", interval="60m", chunk_size=50)
-
-        for ticker in final_heavy_pool:
-            try:
-                name_zh = DYNAMIC_STOCK_NAMES.get(ticker, "")
-                stock_label = f"<code>{ticker}</code>(<i>{name_zh}</i>)" if name_zh else f"<code>{ticker}</code>"
-
-                # 🛠️ 【策略一：30分K MACD負值減少 + KD > 20】
-                if ticker in full_df_30m.columns.levels[1]:
-                    df_m30 = full_df_30m.xs(ticker, axis=1, level=1)
-                    res1, price1 = check_macd_negative_reducing_kd(df_m30, kd_threshold=20)
-                    if res1: 
-                        strat1.append(f"{stock_label}[{price1:.2f}元]")
-
-                # 🛠️ 【策略二：60分K MACD負值減少 + KD > 20】
-                if ticker in full_df_60m.columns.levels[1]:
-                    df_m60 = full_df_60m.xs(ticker, axis=1, level=1)
-                    res2, price2 = check_macd_negative_reducing_kd(df_m60, kd_threshold=20)
-                    if res2: 
-                        strat2.append(f"{stock_label}[{price2:.2f}元]")
-            except Exception as e:
+            if df_d.empty or len(df_d) < 35:
                 continue
 
-    # 📝 Telegram 報告組裝
-    tw_msg = f"🇹🇼 <b>【台股 6 大多頭選股報告】</b>\n⚠️ <i>已過濾 20日均量 &lt; 1000張之殭屍股</i>\n⏰ 時間: {tw_time_str}\n"
-    tw_msg += "───────────────────\n\n"
+            # 檢查 20 日均量門檻
+            avg_vol_20 = df_d["volume"].iloc[-20:].mean()
+            if avg_vol_20 < MIN_AVG_VOLUME_20:
+                continue
+
+            name = DYNAMIC_STOCK_NAMES.get(code, "未知")
+            latest_price = round(df_d["close"].iloc[-1], 2)
+
+            # 準備各週期 K 線
+            df_w = resample_klines(df_d, "W-FRI")
+            df_m = resample_klines(df_d, "ME")
+            df_30m = normalize_dataframe(raw_30m, t_code)
+            df_60m = normalize_dataframe(raw_60m, t_code)
+
+            # 驗證策略
+            s1 = check_strategy_1(df_30m)
+            s2 = check_strategy_2(df_60m)
+            s3 = check_strategy_3(df_d)
+            s4 = check_strategy_4(df_w)
+            s5 = check_strategy_5(df_m)
+
+            if any([s1, s2, s3, s4, s5]):
+                all_results.append({
+                    "code": code,
+                    "name": name,
+                    "price": latest_price,
+                    "s1": s1,
+                    "s2": s2,
+                    "s3": s3,
+                    "s4": s4,
+                    "s5": s5,
+                })
+
+    # ==========================================================================
+    # 輸出最終格式
+    # ==========================================================================
+    df_res = pd.DataFrame(all_results)
     
-    tw_msg += "📈 <b>【策略一】30分K MACD負值減少 + KD &gt; 20</b>\n"
-    tw_msg += f"↳ {', '.join(strat1) if strat1 else '今日無符合標的。 💤'}\n\n"
+    print("\n==================================================================")
+    print("📊 策略選股結果")
+    print("==================================================================")
 
-    tw_msg += "📊 <b>【策略二】60分K MACD負值減少 + KD &gt; 20</b>\n"
-    tw_msg += f"↳ {', '.join(strat2) if strat2 else '今日無符合標的。 💤'}\n\n"
+    strategies = [
+        ("s1", "【策略一】30分K MACD負值減少 + KD大於40"),
+        ("s2", "【策略二】60分K MACD負值減少 + KD大於40"),
+        ("s3", "【策略三】日K MACD大於0 + KD大於20"),
+        ("s4", "【策略四】週K MACD大於0 + KD大於50"),
+        ("s5", "【策略五】月K MACD大於0 + KD大於50"),
+    ]
 
-    tw_msg += "📈 <b>【策略三】日K MACD &gt; 0 + KD &gt; 20</b>\n"
-    tw_msg += f"↳ {', '.join(strat3) if strat3 else '今日無符合標的。 💤'}\n\n"
+    for key, title in strategies:
+        print(f"\n📌 {title}")
+        print("-" * 50)
+        if not df_res.empty and key in df_res.columns:
+            matched = df_res[df_res[key] == True]
+            if not matched.empty:
+                for _, row in matched.iterrows():
+                    print(f"{row['code']} {row['name']} ${row['price']}")
+            else:
+                print("無符合標的")
+        else:
+            print("無符合標的")
 
-    tw_msg += "📊 <b>【策略四】週K MACD &gt; 0 + KD &gt; 50</b>\n"
-    tw_msg += f"↳ {', '.join(strat4) if strat4 else '今日無符合標的。 💤'}\n\n"
-
-    tw_msg += "🌕 <b>【策略五】月K MACD &gt; 0 + KD &gt; 50</b>\n"
-    tw_msg += f"↳ {', '.join(strat5) if strat5 else '今日無符合標的。 💤'}\n\n"
-
-    tw_msg += "💥 <b>【策略六】低檔爆量股 (半年位階 ≤ 30% × 成交量 ≥ 2.5倍5日均量 × 紅K)</b>\n"
-    tw_msg += f"↳ {', '.join(strat6) if strat6 else '今日無符合標的。 💤'}\n"
-
-    send_telegram_message(tw_msg)
-    print(f"✅ 策略報告發送完成！總耗時: {time.time() - start_time:.1f} 秒")
+if __name__ == "__main__":
+    main()
