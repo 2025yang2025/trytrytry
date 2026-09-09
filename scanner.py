@@ -1,3405 +1,2391 @@
+```python
 # scanner.py
 # ==============================================================================
-# 🇹🇼 台股 7 大策略選股 Pro v2.1
+# 🇹🇼 台股 6 大策略選股 Pro v2.1 MTF
 #
-# 功能：
-#   1. TWSE 全市場股票清單
-#   2. 日K / 週K / 月K 多週期掃描
-#   3. 30m / 60m 短週期精掃
-#   4. MACD + KD
-#   5. 低檔爆量策略
-#   6. 技術強度排名
-#   7. 多策略交叉評分
-#   8. ⭐ 新增策略7：S3 + S4 + S5 三週期共振
-#   9. 🔥 新增60分鐘綠柱縮小 → 紅柱判斷
-#  10. Telegram HTML 報告
+# 核心邏輯：
 #
-# 環境變數：
-#   TG_BOT_TOKEN
-#   TG_CHAT_ID
+# 1. 30K：
+#    MACD 綠柱縮小 + KD > 50
 #
+# 2. 60K：
+#    MACD 綠柱縮小 + KD > 50
+#
+# 3. 日K：
+#    MACD > 0 + KD > 20
+#
+# 4. 週K：
+#    MACD 最近突破 0 軸 + MACD > 0 + KD > 50
+#
+# 5. 月K：
+#    MACD 最近突破 0 軸 + MACD > 0 + KD > 50
+#
+# 6. 多週期共振：
+#    日K + 週K + 月K 同時成立
+#
+# 額外核心觸發：
+#    60K MACD 綠柱縮小 → 紅柱
+#
+# ==============================================================================
 # 安裝：
-#   pip install pandas yfinance requests
+#
+# pip install pandas yfinance requests
+#
+# Telegram：
+# TG_BOT_TOKEN
+# TG_CHAT_ID
+#
 # ==============================================================================
 
 import os
 import time
 import html
 import requests
+import warnings
+from typing import Optional, Dict, Any, List
+
+import numpy as np
 import pandas as pd
 import yfinance as yf
 
 
+warnings.filterwarnings("ignore")
+
+
 # ==============================================================================
-# ⚙️ 基本設定
+# 設定
 # ==============================================================================
 
-VERSION = "Pro v2.1"
+VERSION = "Pro v2.1 MTF"
 
 TWSE_API_URL = (
     "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
 )
 
-HEADERS = {
+REQUEST_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 Chrome/131.0 Safari/537.36"
+        "AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
     )
 }
 
-# ------------------------------------------------------------------------------
-# 最低 20 日平均成交量
-# 1,000,000 股 = 1,000 張
-# ------------------------------------------------------------------------------
 
+# ==============================================================================
+# 選股參數
+# ==============================================================================
+
+# 最低 20 日平均成交量
 MIN_AVG_VOLUME_20 = 1_000_000
 
-# ------------------------------------------------------------------------------
-# 30m / 60m 精掃最大股票數
-# ------------------------------------------------------------------------------
 
-INTRADAY_SCAN_LIMIT = 100
-
-# ------------------------------------------------------------------------------
-# Yahoo 分批下載數量
-# ------------------------------------------------------------------------------
-
+# 每次下載股票數量
 DAILY_CHUNK_SIZE = 150
 INTRADAY_CHUNK_SIZE = 50
 
-# ------------------------------------------------------------------------------
-# 是否只掃普通股票
-# ------------------------------------------------------------------------------
 
-ONLY_COMMON_STOCK = True
-
-# ------------------------------------------------------------------------------
+# ----------------------------------------------------------------------
 # KD 門檻
-# ------------------------------------------------------------------------------
+# ----------------------------------------------------------------------
 
-KD_DAILY_THRESHOLD = 20
-KD_WEEKLY_THRESHOLD = 50
-KD_MONTHLY_THRESHOLD = 50
-KD_INTRADAY_THRESHOLD = 20
+# 日K
+DAILY_KD_THRESHOLD = 20
 
-# ------------------------------------------------------------------------------
-# 60分鐘 MACD 綠柱縮小條件
-# ------------------------------------------------------------------------------
+# 週K
+WEEKLY_KD_THRESHOLD = 50
 
-# True：
-# 必須連續兩根改善
-#
-# 例如：
-# -0.80 → -0.55 → -0.30
-#
-# False：
-# 只要最新一根比前一根改善即可
-# ------------------------------------------------------------------------------
+# 月K
+MONTHLY_KD_THRESHOLD = 50
 
-INTRADAY_REQUIRE_TWO_BAR_SHRINK = True
+# ⭐ 30K / 60K
+# 使用者要求修改為 KD > 50
+INTRADAY_KD_THRESHOLD = 50
 
 
-# ==============================================================================
-# 📌 全域股票名稱
-# ==============================================================================
+# ----------------------------------------------------------------------
+# MACD 零軸突破回溯
+# ----------------------------------------------------------------------
+
+WEEKLY_ZERO_CROSS_LOOKBACK = 6
+MONTHLY_ZERO_CROSS_LOOKBACK = 3
+
+
+# ----------------------------------------------------------------------
+# 60K MACD 觸發回溯
+# ----------------------------------------------------------------------
+
+M60_TRIGGER_LOOKBACK = 2
+
+
+# ----------------------------------------------------------------------
+# 動態股票名稱
+# ----------------------------------------------------------------------
 
 DYNAMIC_STOCK_NAMES = {}
 
 
 # ==============================================================================
-# 🧰 工具
+# 基本工具
 # ==============================================================================
 
-def safe_float(value, default=0.0):
-    """安全轉 float"""
-
+def safe_float(value, default=np.nan):
+    """
+    安全轉換數字
+    """
     try:
-
-        if pd.isna(value):
+        if value is None:
             return default
 
-        return float(value)
+        if isinstance(value, str):
+            value = value.replace(",", "").strip()
+
+        result = float(value)
+
+        if np.isnan(result):
+            return default
+
+        return result
 
     except Exception:
-
         return default
 
 
-def get_ticker_code(ticker):
-    """2330.TW → 2330"""
+# ==============================================================================
+# 股票代號
+# ==============================================================================
 
-    return (
-        ticker
-        .replace(".TW", "")
-        .replace(".TWO", "")
-    )
+def get_ticker_code(code: str) -> str:
+    """
+    將台股代號轉成 Yahoo Finance 格式
+    """
+    code = str(code).strip()
+
+    if code.endswith(".TW") or code.endswith(".TWO"):
+        return code
+
+    return f"{code}.TW"
 
 
-def escape_html(text):
-    """Telegram HTML escape"""
+# ==============================================================================
+# HTML
+# ==============================================================================
 
-    return html.escape(str(text))
+def escape_html(text: str) -> str:
+    return html.escape(str(text), quote=False)
 
 
-def get_stock_label(ticker):
-    """建立 Telegram 股票標籤"""
+# ==============================================================================
+# 股票名稱
+# ==============================================================================
 
-    code = get_ticker_code(ticker)
-
-    name = DYNAMIC_STOCK_NAMES.get(
-        ticker,
-        "",
-    )
+def get_stock_label(code: str, name: Optional[str] = None) -> str:
 
     if name:
+        return f"{code} {name}"
 
-        return (
-            f"<code>{code}</code> "
-            f"<i>{escape_html(name)}</i>"
-        )
+    if code in DYNAMIC_STOCK_NAMES:
+        return f"{code} {DYNAMIC_STOCK_NAMES[code]}"
 
-    return f"<code>{code}</code>"
+    return code
 
 
 # ==============================================================================
-# 🇹🇼 TWSE 全市場股票清單
+# 取得台股市場清單
 # ==============================================================================
 
-def fetch_all_taiwan_market_tickers():
-
-    all_tickers = []
+def fetch_all_taiwan_market_tickers() -> pd.DataFrame:
 
     try:
 
         response = requests.get(
             TWSE_API_URL,
-            headers=HEADERS,
-            timeout=15,
+            headers=REQUEST_HEADERS,
+            timeout=20
         )
 
         response.raise_for_status()
 
         data = response.json()
 
-        for item in data:
+        if not data:
+            return pd.DataFrame()
 
-            code = str(
-                item.get(
-                    "Code",
-                    "",
-                )
-            ).strip()
+        df = pd.DataFrame(data)
 
-            name = str(
-                item.get(
-                    "Name",
-                    "",
-                )
-            ).strip()
+        # TWSE API 欄位
+        if "證券代號" in df.columns:
 
-            if not code.isdigit():
-                continue
+            df = df.rename(
+                columns={
+                    "證券代號": "code",
+                    "證券名稱": "name",
+                    "成交股數": "volume",
+                    "成交金額": "turnover",
+                }
+            )
 
-            if len(code) != 4:
-                continue
+        if "code" not in df.columns:
+            return pd.DataFrame()
 
-            ticker = f"{code}.TW"
-
-            all_tickers.append(ticker)
-
-            DYNAMIC_STOCK_NAMES[
-                ticker
-            ] = name
-
-        all_tickers = sorted(
-            set(all_tickers)
+        df["code"] = (
+            df["code"]
+            .astype(str)
+            .str.strip()
         )
 
-        print(
-            f"✅ TWSE 股票清單取得完成："
-            f"{len(all_tickers)} 檔"
-        )
+        # 只保留 4 碼股票
+        df = df[
+            df["code"].str.match(r"^\d{4}$", na=False)
+        ].copy()
 
-        return all_tickers
+        if "name" in df.columns:
+
+            df["name"] = (
+                df["name"]
+                .astype(str)
+                .str.strip()
+            )
+
+        else:
+            df["name"] = ""
+
+        return df
 
     except Exception as e:
 
         print(
-            f"❌ 撈取 TWSE 股票清單失敗：{e}"
+            f"❌ 取得 TWSE 股票清單失敗：{e}"
         )
 
-        return []
+        return pd.DataFrame()
 
 
 # ==============================================================================
-# 🛡️ Yahoo Finance 安全下載
+# Yahoo Finance 下載
 # ==============================================================================
 
 def safe_download_yf(
-    tickers,
-    period,
-    interval,
-    chunk_size=100,
-    max_retry=3,
-):
+    tickers: List[str],
+    period: str,
+    interval: str,
+    retries: int = 3
+) -> pd.DataFrame:
 
     if not tickers:
         return pd.DataFrame()
 
-    all_dfs = []
+    for attempt in range(retries):
 
-    total_chunks = (
-        len(tickers)
-        + chunk_size
-        - 1
-    ) // chunk_size
+        try:
 
-    for start in range(
-        0,
-        len(tickers),
-        chunk_size,
-    ):
-
-        chunk = tickers[
-            start:start + chunk_size
-        ]
-
-        chunk_no = (
-            start // chunk_size
-        ) + 1
-
-        success = False
-
-        for attempt in range(
-            1,
-            max_retry + 1,
-        ):
-
-            try:
-
-                print(
-                    f"📥 Yahoo "
-                    f"{chunk_no}/{total_chunks} "
-                    f"({len(chunk)} 檔) "
-                    f"{interval} "
-                    f"第 {attempt} 次"
-                )
-
-                df = yf.download(
-                    tickers=chunk,
-                    period=period,
-                    interval=interval,
-                    progress=False,
-                    auto_adjust=True,
-                    threads=True,
-                    group_by="column",
-                )
-
-                if (
-                    df is not None
-                    and not df.empty
-                ):
-
-                    all_dfs.append(df)
-
-                    success = True
-
-                    break
-
-                print(
-                    f"⚠️ 批次 {chunk_no} "
-                    f"回傳空資料"
-                )
-
-            except Exception as e:
-
-                print(
-                    f"⚠️ 批次 {chunk_no} "
-                    f"下載失敗：{e}"
-                )
-
-            if attempt < max_retry:
-
-                time.sleep(
-                    2 * attempt
-                )
-
-        if not success:
-
-            print(
-                f"❌ 批次 "
-                f"{chunk_no}/{total_chunks} "
-                f"最終下載失敗"
+            data = yf.download(
+                tickers=tickers,
+                period=period,
+                interval=interval,
+                auto_adjust=False,
+                progress=False,
+                group_by="ticker",
+                threads=True
             )
 
-        time.sleep(0.5)
+            if data is None or data.empty:
+                raise ValueError("Yahoo Finance 無資料")
 
-    if not all_dfs:
+            return data
+
+        except Exception as e:
+
+            print(
+                f"⚠️ Yahoo 下載失敗 "
+                f"({attempt + 1}/{retries})：{e}"
+            )
+
+            time.sleep(2)
+
+    return pd.DataFrame()
+
+
+# ==============================================================================
+# DataFrame 正規化
+# ==============================================================================
+
+def normalize_dataframe(
+    data: pd.DataFrame,
+    ticker: str
+) -> pd.DataFrame:
+
+    if data is None or data.empty:
         return pd.DataFrame()
 
     try:
 
-        result = pd.concat(
-            all_dfs,
-            axis=1,
+        # MultiIndex
+        if isinstance(data.columns, pd.MultiIndex):
+
+            if ticker in data.columns.get_level_values(0):
+
+                df = data[ticker].copy()
+
+            elif ticker in data.columns.get_level_values(1):
+
+                df = data.xs(
+                    ticker,
+                    axis=1,
+                    level=1
+                ).copy()
+
+            else:
+
+                # 單股票情況
+                df = data.copy()
+
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.get_level_values(-1)
+
+        else:
+
+            df = data.copy()
+
+        df.columns = [
+            str(c).lower()
+            for c in df.columns
+        ]
+
+        required = [
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume"
+        ]
+
+        for col in required:
+
+            if col not in df.columns:
+                return pd.DataFrame()
+
+        df = df[required].copy()
+
+        for col in required:
+
+            df[col] = pd.to_numeric(
+                df[col],
+                errors="coerce"
+            )
+
+        df = df.dropna(
+            subset=["close"]
         )
 
-        return result
+        return df
 
     except Exception as e:
 
         print(
-            f"❌ 合併 Yahoo 資料失敗：{e}"
+            f"⚠️ DataFrame 正規化失敗 {ticker}: {e}"
         )
 
         return pd.DataFrame()
 
 
 # ==============================================================================
-# 📊 MultiIndex 資料處理
-# ==============================================================================
-
-def extract_ticker_df(
-    full_df,
-    ticker,
-):
-
-    if (
-        full_df is None
-        or full_df.empty
-    ):
-        return pd.DataFrame()
-
-    try:
-
-        if isinstance(
-            full_df.columns,
-            pd.MultiIndex,
-        ):
-
-            for level_no in range(
-                full_df.columns.nlevels
-            ):
-
-                try:
-
-                    values = (
-                        full_df
-                        .columns
-                        .get_level_values(
-                            level_no
-                        )
-                    )
-
-                    if ticker in values:
-
-                        result = (
-                            full_df.xs(
-                                ticker,
-                                axis=1,
-                                level=level_no,
-                            )
-                        )
-
-                        result = result.copy()
-
-                        return normalize_columns(
-                            result
-                        )
-
-                except Exception:
-                    continue
-
-            return pd.DataFrame()
-
-        result = full_df.copy()
-
-        return normalize_columns(
-            result
-        )
-
-    except Exception:
-
-        return pd.DataFrame()
-
-
-# ==============================================================================
-# 📊 欄位標準化
-# ==============================================================================
-
-def normalize_columns(df):
-
-    if df is None or df.empty:
-        return pd.DataFrame()
-
-    rename_map = {}
-
-    for col in df.columns:
-
-        text = str(col).lower()
-
-        if text == "open":
-            rename_map[col] = "Open"
-
-        elif text == "high":
-            rename_map[col] = "High"
-
-        elif text == "low":
-            rename_map[col] = "Low"
-
-        elif text == "close":
-            rename_map[col] = "Close"
-
-        elif text == "volume":
-            rename_map[col] = "Volume"
-
-    df = df.rename(
-        columns=rename_map
-    )
-
-    return df
-
-
-# ==============================================================================
-# 📈 MACD
+# MACD
 # ==============================================================================
 
 def calculate_macd(
-    close_series,
-    fast=12,
-    slow=26,
-    signal=9,
+    close: pd.Series,
+    fast: int = 12,
+    slow: int = 26,
+    signal: int = 9
 ):
 
-    close = (
-        pd.to_numeric(
-            close_series,
-            errors="coerce",
-        )
-        .dropna()
-        .astype(float)
-    )
-
-    if len(close) < 35:
-
-        return (
-            pd.Series(dtype=float),
-            pd.Series(dtype=float),
-            pd.Series(dtype=float),
-        )
-
-    fast_ema = close.ewm(
+    ema_fast = close.ewm(
         span=fast,
-        adjust=False,
+        adjust=False
     ).mean()
 
-    slow_ema = close.ewm(
+    ema_slow = close.ewm(
         span=slow,
-        adjust=False,
+        adjust=False
     ).mean()
 
-    macd_line = (
-        fast_ema
-        - slow_ema
+    macd = ema_fast - ema_slow
+
+    signal_line = macd.ewm(
+        span=signal,
+        adjust=False
+    ).mean()
+
+    hist = macd - signal_line
+
+    return macd, signal_line, hist
+
+
+# ==============================================================================
+# KD
+# ==============================================================================
+
+def calculate_kd(
+    df: pd.DataFrame,
+    period: int = 9,
+    k_period: int = 3,
+    d_period: int = 3
+):
+
+    low_min = (
+        df["low"]
+        .rolling(period)
+        .min()
     )
 
-    signal_line = (
-        macd_line
+    high_max = (
+        df["high"]
+        .rolling(period)
+        .max()
+    )
+
+    denominator = high_max - low_min
+
+    rsv = (
+        (df["close"] - low_min)
+        / denominator.replace(0, np.nan)
+        * 100
+    )
+
+    k = (
+        rsv
         .ewm(
-            span=signal,
-            adjust=False,
+            alpha=1 / k_period,
+            adjust=False
         )
         .mean()
     )
 
-    histogram = (
-        macd_line
-        - signal_line
+    d = (
+        k
+        .ewm(
+            alpha=1 / d_period,
+            adjust=False
+        )
+        .mean()
     )
 
-    return (
-        macd_line,
-        signal_line,
-        histogram,
-    )
+    return k, d
 
 
 # ==============================================================================
-# 📊 KD
+# KD 狀態
 # ==============================================================================
 
-def calculate_kd(
-    df_single,
-    n=9,
-    m1=3,
-    m2=3,
-):
+def get_kd_state(
+    df: pd.DataFrame
+) -> Dict[str, Any]:
 
-    required = [
-        "High",
-        "Low",
-        "Close",
-    ]
-
-    for col in required:
-
-        if col not in df_single.columns:
-
-            return (
-                pd.Series(dtype=float),
-                pd.Series(dtype=float),
-            )
-
-    df = (
-        df_single[required]
-        .copy()
-    )
-
-    for col in required:
-
-        df[col] = pd.to_numeric(
-            df[col],
-            errors="coerce",
-        )
-
-    df = df.dropna()
-
-    if len(df) < n:
-
-        return (
-            pd.Series(dtype=float),
-            pd.Series(dtype=float),
-        )
-
-    lowest = (
-        df["Low"]
-        .rolling(
-            window=n,
-            min_periods=n,
-        )
-        .min()
-    )
-
-    highest = (
-        df["High"]
-        .rolling(
-            window=n,
-            min_periods=n,
-        )
-        .max()
-    )
-
-    denominator = (
-        highest
-        - lowest
-    )
-
-    rsv = (
-        (
-            df["Close"]
-            - lowest
-        )
-        /
-        denominator.replace(
-            0,
-            pd.NA,
-        )
-        * 100
-    )
-
-    rsv = rsv.fillna(50.0)
-
-    k_values = []
-    d_values = []
-
-    k_prev = 50.0
-    d_prev = 50.0
-
-    for value in rsv:
-
-        value = safe_float(
-            value,
-            50.0,
-        )
-
-        k_curr = (
-            k_prev * (m1 - 1)
-            + value
-        ) / m1
-
-        d_curr = (
-            d_prev * (m2 - 1)
-            + k_curr
-        ) / m2
-
-        k_values.append(
-            k_curr
-        )
-
-        d_values.append(
-            d_curr
-        )
-
-        k_prev = k_curr
-        d_prev = d_curr
-
-    return (
-        pd.Series(
-            k_values,
-            index=df.index,
-        ),
-        pd.Series(
-            d_values,
-            index=df.index,
-        ),
-    )
-
-
-# ==============================================================================
-# 📌 KD 狀態
-# ==============================================================================
-
-def get_kd_state(df):
+    if df.empty:
+        return {
+            "k": np.nan,
+            "d": np.nan,
+            "golden_cross": False
+        }
 
     k, d = calculate_kd(df)
 
-    if (
-        len(k) < 2
-        or len(d) < 2
-    ):
-
+    if len(k) < 2:
         return {
-            "k": 0.0,
-            "d": 0.0,
-            "above": False,
-            "golden_cross": False,
+            "k": np.nan,
+            "d": np.nan,
+            "golden_cross": False
         }
 
-    k_now = safe_float(
-        k.iloc[-1]
-    )
+    current_k = safe_float(k.iloc[-1])
+    current_d = safe_float(d.iloc[-1])
 
-    d_now = safe_float(
-        d.iloc[-1]
-    )
-
-    k_prev = safe_float(
-        k.iloc[-2]
-    )
-
-    d_prev = safe_float(
-        d.iloc[-2]
-    )
+    previous_k = safe_float(k.iloc[-2])
+    previous_d = safe_float(d.iloc[-2])
 
     golden_cross = (
-        k_prev <= d_prev
-        and k_now > d_now
+        not np.isnan(previous_k)
+        and not np.isnan(previous_d)
+        and not np.isnan(current_k)
+        and not np.isnan(current_d)
+        and previous_k <= previous_d
+        and current_k > current_d
     )
 
     return {
-        "k": k_now,
-        "d": d_now,
-        "above": k_now > d_now,
-        "golden_cross": golden_cross,
+        "k": current_k,
+        "d": current_d,
+        "golden_cross": golden_cross
     }
 
 
 # ==============================================================================
-# 📌 MACD 狀態
+# MACD 狀態
 # ==============================================================================
 
-def get_macd_state(df):
+def get_macd_state(
+    df: pd.DataFrame
+) -> Dict[str, Any]:
 
-    if (
-        df is None
-        or df.empty
-        or "Close" not in df.columns
-    ):
+    if df.empty:
+        return {
+            "macd": np.nan,
+            "signal": np.nan,
+            "hist": np.nan,
+            "hist_prev": np.nan,
+            "hist_prev2": np.nan
+        }
 
-        return None
-
-    close = (
-        pd.to_numeric(
-            df["Close"],
-            errors="coerce",
-        )
-        .dropna()
+    macd, signal, hist = calculate_macd(
+        df["close"]
     )
 
-    if len(close) < 35:
-        return None
+    return {
+        "macd": safe_float(macd.iloc[-1]),
+        "signal": safe_float(signal.iloc[-1]),
+        "hist": safe_float(hist.iloc[-1]),
+        "hist_prev": safe_float(
+            hist.iloc[-2]
+        ) if len(hist) >= 2 else np.nan,
+        "hist_prev2": safe_float(
+            hist.iloc[-3]
+        ) if len(hist) >= 3 else np.nan
+    }
 
-    macd, signal, hist = (
-        calculate_macd(
-            close
-        )
+
+# ==============================================================================
+# MACD 最近突破零軸
+# ==============================================================================
+
+def get_recent_zero_cross_info(
+    df: pd.DataFrame,
+    lookback: int
+) -> Dict[str, Any]:
+
+    result = {
+        "crossed": False,
+        "bars_ago": None,
+        "current_above_zero": False
+    }
+
+    if df.empty or len(df) < 3:
+        return result
+
+    macd, _, _ = calculate_macd(
+        df["close"]
     )
 
-    if len(macd) < 3:
-        return None
-
-    macd_now = safe_float(
+    current_macd = safe_float(
         macd.iloc[-1]
     )
 
-    macd_prev = safe_float(
-        macd.iloc[-2]
+    result["current_above_zero"] = (
+        not np.isnan(current_macd)
+        and current_macd > 0
     )
 
-    hist_now = safe_float(
-        hist.iloc[-1]
+    start = max(
+        1,
+        len(macd) - lookback
     )
 
-    hist_prev = safe_float(
-        hist.iloc[-2]
-    )
+    for i in range(
+        len(macd) - 1,
+        start - 1,
+        -1
+    ):
 
-    hist_prev2 = safe_float(
-        hist.iloc[-3]
-    )
+        current = safe_float(
+            macd.iloc[i]
+        )
 
-    signal_now = safe_float(
-        signal.iloc[-1]
-    )
+        previous = safe_float(
+            macd.iloc[i - 1]
+        )
 
-    signal_prev = safe_float(
-        signal.iloc[-2]
-    )
+        if (
+            not np.isnan(current)
+            and not np.isnan(previous)
+            and previous <= 0
+            and current > 0
+        ):
 
-    return {
-        "macd": macd_now,
+            result["crossed"] = True
+            result["bars_ago"] = (
+                len(macd) - 1 - i
+            )
 
-        "macd_prev":
-            macd_prev,
+            break
 
-        "signal":
-            signal_now,
-
-        "signal_prev":
-            signal_prev,
-
-        "hist":
-            hist_now,
-
-        "hist_prev":
-            hist_prev,
-
-        "hist_prev2":
-            hist_prev2,
-
-        "macd_positive":
-            macd_now > 0,
-
-        "macd_cross_zero":
-            (
-                macd_prev <= 0
-                and macd_now > 0
-            ),
-
-        "macd_rising":
-            macd_now > macd_prev,
-
-        "hist_rising":
-            hist_now > hist_prev,
-
-        "hist_rising_2":
-            (
-                hist_now > hist_prev
-                and
-                hist_prev > hist_prev2
-            ),
-
-        "golden_cross":
-            (
-                signal_prev >= macd_prev
-                and
-                macd_now > signal_now
-            ),
-
-        "hist_negative_reducing":
-            (
-                hist_now < 0
-                and
-                hist_now > hist_prev
-            ),
-    }
+    return result
 
 
 # ==============================================================================
-# 📈 策略 1 / 2
-# MACD 負值減少 + KD
+# MACD 綠柱縮小 + KD
 # ==============================================================================
 
 def check_macd_negative_reducing_kd(
-    df_tf,
-    kd_threshold=20,
-):
+    df: pd.DataFrame,
+    kd_threshold: float
+) -> Dict[str, Any]:
 
-    try:
+    result = {
+        "pass": False,
+        "hist": np.nan,
+        "hist_prev": np.nan,
+        "hist_prev2": np.nan,
+        "k": np.nan,
+        "d": np.nan,
+        "golden_cross": False,
+        "green_shrinking": False
+    }
 
-        if (
-            df_tf is None
-            or df_tf.empty
-        ):
+    if df.empty or len(df) < 30:
+        return result
 
-            return False, 0.0, {}
+    macd_state = get_macd_state(df)
+    kd_state = get_kd_state(df)
 
-        clean = df_tf.dropna(
-            subset=[
-                "Close",
-                "High",
-                "Low",
-            ]
-        )
+    hist = macd_state["hist"]
+    hist_prev = macd_state["hist_prev"]
+    hist_prev2 = macd_state["hist_prev2"]
 
-        if len(clean) < 35:
+    result.update({
+        "hist": hist,
+        "hist_prev": hist_prev,
+        "hist_prev2": hist_prev2,
+        "k": kd_state["k"],
+        "d": kd_state["d"],
+        "golden_cross": kd_state["golden_cross"]
+    })
 
-            return False, 0.0, {}
+    # ------------------------------------------------------------------
+    # MACD 綠柱縮小
+    #
+    # hist < 0
+    # 且目前柱體比前一根接近 0
+    # ------------------------------------------------------------------
 
-        macd_state = (
-            get_macd_state(
-                clean
-            )
-        )
+    green_shrinking = (
+        not np.isnan(hist)
+        and not np.isnan(hist_prev)
+        and hist < 0
+        and hist > hist_prev
+    )
 
-        if macd_state is None:
+    result["green_shrinking"] = green_shrinking
 
-            return False, 0.0, {}
+    # ------------------------------------------------------------------
+    # KD > threshold
+    #
+    # ⭐ 30K / 60K 現在 threshold = 50
+    # ------------------------------------------------------------------
 
-        kd_state = (
-            get_kd_state(
-                clean
-            )
-        )
+    kd_ok = (
+        not np.isnan(kd_state["k"])
+        and not np.isnan(kd_state["d"])
+        and kd_state["k"] > kd_threshold
+        and kd_state["d"] > kd_threshold
+    )
 
-        macd_condition = (
-            macd_state[
-                "hist_negative_reducing"
-            ]
-            or
-            (
-                macd_state["macd"] < 0
-                and
-                macd_state[
-                    "macd_rising"
-                ]
-            )
-        )
+    result["pass"] = (
+        green_shrinking
+        and kd_ok
+    )
 
-        kd_condition = (
-            kd_state["k"]
-            > kd_threshold
-            and
-            kd_state["d"]
-            > kd_threshold
-        )
-
-        result = (
-            macd_condition
-            and kd_condition
-        )
-
-        price = safe_float(
-            clean[
-                "Close"
-            ].iloc[-1]
-        )
-
-        return (
-            result,
-            price,
-            {
-                "macd": macd_state,
-                "kd": kd_state,
-            },
-        )
-
-    except Exception:
-
-        return False, 0.0, {}
+    return result
 
 
 # ==============================================================================
-# 📈 策略 3 / 4 / 5
 # MACD > 0 + KD
 # ==============================================================================
 
 def check_macd_above_zero_kd(
-    df_tf,
-    kd_threshold=20,
-):
-
-    try:
-
-        if (
-            df_tf is None
-            or df_tf.empty
-        ):
-
-            return False, 0.0, {}
-
-        clean = df_tf.dropna(
-            subset=[
-                "Close",
-                "High",
-                "Low",
-            ]
-        )
-
-        if len(clean) < 35:
-
-            return False, 0.0, {}
-
-        macd_state = (
-            get_macd_state(
-                clean
-            )
-        )
-
-        if macd_state is None:
-
-            return False, 0.0, {}
-
-        kd_state = (
-            get_kd_state(
-                clean
-            )
-        )
-
-        macd_condition = (
-            macd_state["macd"]
-            > 0
-        )
-
-        kd_condition = (
-            kd_state["k"]
-            > kd_threshold
-            and
-            kd_state["d"]
-            > kd_threshold
-        )
-
-        result = (
-            macd_condition
-            and kd_condition
-        )
-
-        price = safe_float(
-            clean[
-                "Close"
-            ].iloc[-1]
-        )
-
-        return (
-            result,
-            price,
-            {
-                "macd": macd_state,
-                "kd": kd_state,
-            },
-        )
-
-    except Exception:
-
-        return False, 0.0, {}
-
-
-# ==============================================================================
-# ⭐ 策略 7：S3 + S4 + S5 三週期共振
-# ==============================================================================
-
-def check_strategy_7_resonance(
-    s3,
-    s4,
-    s5,
-):
-    """
-    策略7：
-
-        S3 日K
-        +
-        S4 週K
-        +
-        S5 月K
-
-    三個策略同時成立。
-
-    注意：
-        策略7不是取代S3/S4/S5，
-        而是額外建立「三週期共振」。
-    """
-
-    return (
-        bool(s3)
-        and
-        bool(s4)
-        and
-        bool(s5)
-    )
-
-
-# ==============================================================================
-# 🔥 60分鐘 MACD 綠柱縮小 → 紅柱
-# ==============================================================================
-
-def check_60m_macd_transition(
-    df_60m
-):
-    """
-    60分鐘核心觸發：
-
-    1. 綠柱縮小
-
-       -0.80
-       -0.60
-       -0.35
-
-       → 越來越接近0
-
-    2. 綠柱 → 紅柱
-
-       -0.30
-       -0.10
-       +0.05
-
-       → 最強訊號
-
-    """
-
-    if (
-        df_60m is None
-        or df_60m.empty
-    ):
-
-        return {
-            "valid": False,
-            "status": "NO_DATA",
-        }
-
-    clean = df_60m.dropna(
-        subset=[
-            "Close",
-            "High",
-            "Low",
-        ]
-    )
-
-    if len(clean) < 35:
-
-        return {
-            "valid": False,
-            "status": "NO_DATA",
-        }
-
-    macd_state = (
-        get_macd_state(
-            clean
-        )
-    )
-
-    if macd_state is None:
-
-        return {
-            "valid": False,
-            "status": "NO_DATA",
-        }
-
-    h1 = macd_state[
-        "hist"
-    ]
-
-    h2 = macd_state[
-        "hist_prev"
-    ]
-
-    h3 = macd_state[
-        "hist_prev2"
-    ]
-
-    # --------------------------------------------------------------------------
-    # 綠柱縮小
-    # --------------------------------------------------------------------------
-
-    shrink_one = (
-        h1 < 0
-        and
-        h1 > h2
-    )
-
-    shrink_two = (
-        h1 < 0
-        and
-        h1 > h2
-        and
-        h2 > h3
-    )
-
-    if INTRADAY_REQUIRE_TWO_BAR_SHRINK:
-
-        green_shrinking = (
-            shrink_two
-        )
-
-    else:
-
-        green_shrinking = (
-            shrink_one
-        )
-
-    # --------------------------------------------------------------------------
-    # 綠柱 → 紅柱
-    # --------------------------------------------------------------------------
-
-    green_to_red = (
-        h2 < 0
-        and
-        h1 >= 0
-        and
-        h1 > h2
-    )
-
-    # --------------------------------------------------------------------------
-    # 判斷狀態
-    # --------------------------------------------------------------------------
-
-    if green_to_red:
-
-        status = (
-            "🔥 GREEN_TO_RED"
-        )
-
-    elif green_shrinking:
-
-        status = (
-            "🟢 GREEN_SHRINKING"
-        )
-
-    elif h1 > 0:
-
-        status = (
-            "🔴 RED"
-        )
-
-    elif h1 < 0:
-
-        status = (
-            "🟢 GREEN"
-        )
-
-    else:
-
-        status = (
-            "⚪ ZERO"
-        )
-
-    return {
-        "valid": True,
-
-        "status": status,
-
-        "green_shrinking":
-            green_shrinking,
-
-        "green_to_red":
-            green_to_red,
-
-        "macd":
-            macd_state["macd"],
-
-        "signal":
-            macd_state["signal"],
-
-        "hist":
-            h1,
-
-        "hist_prev":
-            h2,
-
-        "hist_prev2":
-            h3,
+    df: pd.DataFrame,
+    kd_threshold: float
+) -> Dict[str, Any]:
+
+    result = {
+        "pass": False,
+        "macd": np.nan,
+        "signal": np.nan,
+        "k": np.nan,
+        "d": np.nan,
+        "golden_cross": False
     }
 
+    if df.empty or len(df) < 30:
+        return result
 
-# ==============================================================================
-# 💥 策略 6
-# 低檔爆量
-# ==============================================================================
+    macd_state = get_macd_state(df)
+    kd_state = get_kd_state(df)
 
-def check_strat_orig_8(
-    df_daily,
-):
+    result.update({
+        "macd": macd_state["macd"],
+        "signal": macd_state["signal"],
+        "k": kd_state["k"],
+        "d": kd_state["d"],
+        "golden_cross": kd_state["golden_cross"]
+    })
 
-    try:
-
-        if df_daily is None:
-
-            return (
-                False,
-                0.0,
-                {},
-            )
-
-        required = [
-            "Close",
-            "High",
-            "Low",
-            "Open",
-            "Volume",
-        ]
-
-        clean = (
-            df_daily
-            .dropna(
-                subset=required
-            )
-            .copy()
-        )
-
-        if len(clean) < 120:
-
-            return (
-                False,
-                0.0,
-                {},
-            )
-
-        close = (
-            clean["Close"]
-            .astype(float)
-        )
-
-        open_price = (
-            clean["Open"]
-            .astype(float)
-        )
-
-        volume = (
-            clean["Volume"]
-            .astype(float)
-        )
-
-        low_120 = (
-            close
-            .rolling(120)
-            .min()
-            .iloc[-1]
-        )
-
-        high_120 = (
-            close
-            .rolling(120)
-            .max()
-            .iloc[-1]
-        )
-
-        if (
-            pd.isna(low_120)
-            or
-            pd.isna(high_120)
-            or
-            high_120 <= low_120
-        ):
-
-            return (
-                False,
-                0.0,
-                {},
-            )
-
-        current_price = (
-            close.iloc[-1]
-        )
-
-        position = (
-            current_price
-            - low_120
-        ) / (
-            high_120
-            - low_120
-        )
-
-        previous_volume_ma5 = (
-            volume
-            .rolling(5)
-            .mean()
-            .shift(1)
-            .iloc[-1]
-        )
-
-        volume_ratio = (
-            current_volume_ratio(
-                volume,
-                previous_volume_ma5,
-            )
-        )
-
-        is_low_position = (
-            position <= 0.30
-        )
-
-        is_volume_surge = (
-            volume_ratio >= 2.5
-        )
-
-        is_red_k = (
-            close.iloc[-1]
-            > open_price.iloc[-1]
-        )
-
-        result = (
-            is_low_position
-            and
-            is_volume_surge
-            and
-            is_red_k
-        )
-
-        return (
-            result,
-            current_price,
-            {
-                "position":
-                    position,
-
-                "volume_ratio":
-                    volume_ratio,
-
-                "red_k":
-                    is_red_k,
-            },
-        )
-
-    except Exception:
-
-        return (
-            False,
-            0.0,
-            {},
-        )
-
-
-def current_volume_ratio(
-    volume,
-    previous_ma5,
-):
-
-    if (
-        previous_ma5 is None
-        or
-        previous_ma5 <= 0
-    ):
-
-        return 0.0
-
-    return (
-        safe_float(
-            volume.iloc[-1]
-        )
-        /
-        previous_ma5
+    macd_ok = (
+        not np.isnan(macd_state["macd"])
+        and macd_state["macd"] > 0
     )
 
+    kd_ok = (
+        not np.isnan(kd_state["k"])
+        and not np.isnan(kd_state["d"])
+        and kd_state["k"] > kd_threshold
+        and kd_state["d"] > kd_threshold
+    )
+
+    result["pass"] = (
+        macd_ok
+        and kd_ok
+    )
+
+    return result
+
 
 # ==============================================================================
-# 📊 日K強度評分
+# 60K MACD 觸發
+# ==============================================================================
+#
+# 注意：
+#
+# 這裡是獨立的「60K 最終觸發」
+#
+# 不強制 KD > 50。
+#
+# 原因是使用者原本的核心概念：
+#
+# 60K MACD 綠柱縮小 → 紅柱
+#
+# KD > 50 已經放在「策略 2」裡面。
+#
+# ==============================================================================
+
+def check_60m_trigger(
+    df: pd.DataFrame
+) -> Dict[str, Any]:
+
+    result = {
+        "green_shrinking": False,
+        "green_to_red": False,
+        "pass": False,
+        "hist": np.nan,
+        "hist_prev": np.nan,
+        "hist_prev2": np.nan
+    }
+
+    if df.empty or len(df) < 30:
+        return result
+
+    macd, signal, hist = calculate_macd(
+        df["close"]
+    )
+
+    current = safe_float(
+        hist.iloc[-1]
+    )
+
+    previous = safe_float(
+        hist.iloc[-2]
+    )
+
+    previous2 = safe_float(
+        hist.iloc[-3]
+    )
+
+    result["hist"] = current
+    result["hist_prev"] = previous
+    result["hist_prev2"] = previous2
+
+    # --------------------------------------------------------------
+    # 綠柱縮小
+    # --------------------------------------------------------------
+
+    green_shrinking = (
+        not np.isnan(current)
+        and not np.isnan(previous)
+        and not np.isnan(previous2)
+        and current < 0
+        and current > previous
+        and previous > previous2
+    )
+
+    # --------------------------------------------------------------
+    # 綠柱 → 紅柱
+    # --------------------------------------------------------------
+
+    green_to_red = (
+        not np.isnan(current)
+        and not np.isnan(previous)
+        and previous < 0
+        and current >= 0
+    )
+
+    result["green_shrinking"] = green_shrinking
+    result["green_to_red"] = green_to_red
+
+    result["pass"] = (
+        green_shrinking
+        or green_to_red
+    )
+
+    return result
+
+
+# ==============================================================================
+# 日K強度
 # ==============================================================================
 
 def calculate_daily_strength(
-    df_daily,
-):
-
-    try:
-
-        if df_daily is None:
-
-            return 0.0, {}
-
-        clean = df_daily.dropna(
-            subset=[
-                "Open",
-                "High",
-                "Low",
-                "Close",
-                "Volume",
-            ]
-        )
-
-        if len(clean) < 120:
-
-            return 0.0, {}
-
-        close = (
-            clean["Close"]
-            .astype(float)
-        )
-
-        volume = (
-            clean["Volume"]
-            .astype(float)
-        )
-
-        price = close.iloc[-1]
-
-        ma5 = (
-            close
-            .rolling(5)
-            .mean()
-            .iloc[-1]
-        )
-
-        ma20 = (
-            close
-            .rolling(20)
-            .mean()
-            .iloc[-1]
-        )
-
-        ma60 = (
-            close
-            .rolling(60)
-            .mean()
-            .iloc[-1]
-        )
-
-        ma120 = (
-            close
-            .rolling(120)
-            .mean()
-            .iloc[-1]
-        )
-
-        volume_ma20 = (
-            volume
-            .rolling(20)
-            .mean()
-            .iloc[-1]
-        )
-
-        score = 0.0
-
-        # ----------------------------------------------------------------------
-        # 價格 > 均線
-        # ----------------------------------------------------------------------
-
-        if price > ma5:
-            score += 5
-
-        if price > ma20:
-            score += 15
-
-        if price > ma60:
-            score += 10
-
-        if price > ma120:
-            score += 10
-
-        # ----------------------------------------------------------------------
-        # 均線多頭排列
-        # ----------------------------------------------------------------------
-
-        if (
-            ma5 > ma20
-            and
-            ma20 > ma60
-        ):
-
-            score += 15
-
-        if (
-            ma20 > ma60
-            and
-            ma60 > ma120
-        ):
-
-            score += 10
-
-        # ----------------------------------------------------------------------
-        # MACD
-        # ----------------------------------------------------------------------
-
-        macd_state = (
-            get_macd_state(
-                clean
-            )
-        )
-
-        if macd_state:
-
-            if macd_state[
-                "macd_positive"
-            ]:
-
-                score += 10
-
-            if macd_state[
-                "macd_rising"
-            ]:
-
-                score += 5
-
-            if macd_state[
-                "hist_rising"
-            ]:
-
-                score += 5
-
-            if macd_state[
-                "macd_cross_zero"
-            ]:
-
-                score += 10
-
-        # ----------------------------------------------------------------------
-        # KD
-        # ----------------------------------------------------------------------
-
-        kd = get_kd_state(
-            clean
-        )
-
-        if kd["k"] > 50:
-            score += 5
-
-        if kd["k"] > kd["d"]:
-            score += 5
-
-        # ----------------------------------------------------------------------
-        # 成交量
-        # ----------------------------------------------------------------------
-
-        if (
-            volume_ma20
-            >= MIN_AVG_VOLUME_20
-        ):
-
-            score += 5
-
-        return (
-            score,
-            {
-                "price":
-                    price,
-
-                "ma20":
-                    ma20,
-
-                "ma60":
-                    ma60,
-
-                "ma120":
-                    ma120,
-
-                "macd":
-                    macd_state,
-
-                "kd":
-                    kd,
-            },
-        )
-
-    except Exception:
-
-        return 0.0, {}
-
-
-# ==============================================================================
-# 📊 多策略綜合評分
-# ==============================================================================
-
-def calculate_strategy_score(
-    strategy_flags,
-    daily_info=None,
-    weekly_info=None,
-    monthly_info=None,
-    m30_info=None,
-    m60_info=None,
-):
-
-    """
-    Pro v2.1 評分。
-
-    S1 = 10
-    S2 = 10
-    S3 = 15
-    S4 = 15
-    S5 = 15
-    S6 = 15
-
-    ⭐ S7 三週期共振 = 額外 10 分
-
-    技術加分：
-        MACD突破0
-        KD黃金交叉
-        多週期共振
-    """
-
-    score = 0
-
-    if strategy_flags.get("s1"):
-        score += 10
-
-    if strategy_flags.get("s2"):
-        score += 10
-
-    if strategy_flags.get("s3"):
-        score += 15
-
-    if strategy_flags.get("s4"):
-        score += 15
-
-    if strategy_flags.get("s5"):
-        score += 15
-
-    if strategy_flags.get("s6"):
-        score += 15
-
-    # ==========================================================================
-    # ⭐ 策略7：S3 + S4 + S5
-    # ==========================================================================
-
-    if strategy_flags.get("s7"):
-
-        # 三週期共振額外加分
-        score += 10
-
-    infos = [
-        daily_info,
-        weekly_info,
-        monthly_info,
-        m30_info,
-        m60_info,
-    ]
-
-    # ==========================================================================
-    # MACD突破0
-    # ==========================================================================
-
-    for info in infos:
-
-        if not info:
-            continue
-
-        macd = info.get(
-            "macd"
-        )
-
-        if (
-            macd
-            and
-            macd.get(
-                "macd_cross_zero"
-            )
-        ):
-
-            score += 2
-
-    # ==========================================================================
-    # KD黃金交叉
-    # ==========================================================================
-
-    for info in infos:
-
-        if not info:
-            continue
-
-        kd = info.get(
-            "kd"
-        )
-
-        if (
-            kd
-            and
-            kd.get(
-                "golden_cross"
-            )
-        ):
-
-            score += 2
-
-    # ==========================================================================
-    # 多週期 MACD > 0
-    # ==========================================================================
-
-    positive_count = 0
-
-    for info in infos:
-
-        if not info:
-            continue
-
-        macd = info.get(
-            "macd"
-        )
-
-        if (
-            macd
-            and
-            macd.get(
-                "macd_positive"
-            )
-        ):
-
-            positive_count += 1
-
-    if positive_count >= 3:
-        score += 5
-
-    if positive_count >= 4:
-        score += 5
-
-    # ==========================================================================
-    # 上限100
-    # ==========================================================================
-
-    return min(
-        score,
-        100,
+    df: pd.DataFrame
+) -> float:
+
+    if df.empty or len(df) < 20:
+        return 0
+
+    close = df["close"]
+
+    ma20 = (
+        close
+        .rolling(20)
+        .mean()
+        .iloc[-1]
     )
 
+    current = close.iloc[-1]
 
-# ==============================================================================
-# 🏆 評級
-# ==============================================================================
+    if np.isnan(ma20) or ma20 == 0:
+        return 0
 
-def get_grade(score):
+    strength = (
+        (current / ma20) - 1
+    ) * 100
 
-    if score >= 80:
-        return "🔥 S"
-
-    if score >= 65:
-        return "⭐ A"
-
-    if score >= 50:
-        return "🟢 B"
-
-    if score >= 35:
-        return "🟡 C"
-
-    return "⚪ D"
+    return float(strength)
 
 
 # ==============================================================================
-# 📋 股票掃描結果
+# 單股票掃描
 # ==============================================================================
 
 def scan_stock(
-    ticker,
-    daily_df,
-    weekly_df=None,
-    monthly_df=None,
-    m30_df=None,
-    m60_df=None,
-):
-
-    result = {
-
-        "ticker":
-            ticker,
-
-        "name":
-            DYNAMIC_STOCK_NAMES.get(
-                ticker,
-                "",
-            ),
-
-        "price":
-            0.0,
-
-        "s1":
-            False,
-
-        "s2":
-            False,
-
-        "s3":
-            False,
-
-        "s4":
-            False,
-
-        "s5":
-            False,
-
-        "s6":
-            False,
-
-        # ⭐ 新增
-        "s7":
-            False,
-
-        "daily":
-            {},
-
-        "weekly":
-            {},
-
-        "monthly":
-            {},
-
-        "m30":
-            {},
-
-        "m60":
-            {},
-
-        # 60m 狀態
-        "m60_trigger":
-            {},
-
-        "score":
-            0,
-
-        "grade":
-            "⚪ D",
-    }
+    code: str,
+    name: str,
+    daily_df: pd.DataFrame,
+    weekly_df: pd.DataFrame,
+    monthly_df: pd.DataFrame,
+    m30_df: pd.DataFrame,
+    m60_df: pd.DataFrame
+) -> Optional[Dict[str, Any]]:
 
     try:
 
-        if (
-            daily_df is None
-            or daily_df.empty
+        # ==============================================================
+        # Strategy 1
+        # 30K MACD 綠柱縮小 + KD > 50
+        # ==============================================================
+
+        s1_data = check_macd_negative_reducing_kd(
+            m30_df,
+            INTRADAY_KD_THRESHOLD
+        )
+
+        s1 = s1_data["pass"]
+
+
+        # ==============================================================
+        # Strategy 2
+        # 60K MACD 綠柱縮小 + KD > 50
+        # ==============================================================
+
+        s2_data = check_macd_negative_reducing_kd(
+            m60_df,
+            INTRADAY_KD_THRESHOLD
+        )
+
+        s2 = s2_data["pass"]
+
+
+        # ==============================================================
+        # 60K 最終觸發
+        # ==============================================================
+
+        m60_trigger = check_60m_trigger(
+            m60_df
+        )
+
+
+        # ==============================================================
+        # Strategy 3
+        # 日K MACD > 0 + KD > 20
+        # ==============================================================
+
+        s3_data = check_macd_above_zero_kd(
+            daily_df,
+            DAILY_KD_THRESHOLD
+        )
+
+        s3 = s3_data["pass"]
+
+
+        # ==============================================================
+        # Strategy 4
+        # 週K：
+        #
+        # 最近突破 0 軸
+        # +
+        # 現在 MACD > 0
+        # +
+        # KD > 50
+        # ==============================================================
+
+        weekly_zero = get_recent_zero_cross_info(
+            weekly_df,
+            WEEKLY_ZERO_CROSS_LOOKBACK
+        )
+
+        weekly_kd = get_kd_state(
+            weekly_df
+        )
+
+        s4 = (
+            weekly_zero["crossed"]
+            and weekly_zero["current_above_zero"]
+            and not np.isnan(weekly_kd["k"])
+            and not np.isnan(weekly_kd["d"])
+            and weekly_kd["k"] > WEEKLY_KD_THRESHOLD
+            and weekly_kd["d"] > WEEKLY_KD_THRESHOLD
+        )
+
+
+        # ==============================================================
+        # Strategy 5
+        # 月K：
+        #
+        # 最近突破 0 軸
+        # +
+        # 現在 MACD > 0
+        # +
+        # KD > 50
+        # ==============================================================
+
+        monthly_zero = get_recent_zero_cross_info(
+            monthly_df,
+            MONTHLY_ZERO_CROSS_LOOKBACK
+        )
+
+        monthly_kd = get_kd_state(
+            monthly_df
+        )
+
+        s5 = (
+            monthly_zero["crossed"]
+            and monthly_zero["current_above_zero"]
+            and not np.isnan(monthly_kd["k"])
+            and not np.isnan(monthly_kd["d"])
+            and monthly_kd["k"] > MONTHLY_KD_THRESHOLD
+            and monthly_kd["d"] > MONTHLY_KD_THRESHOLD
+        )
+
+
+        # ==============================================================
+        # Strategy 6
+        #
+        # 日K + 週K + 月K
+        #
+        # 多週期共振
+        # ==============================================================
+
+        s6 = (
+            s3
+            and s4
+            and s5
+        )
+
+
+        # ==============================================================
+        # 沒有任何條件直接跳過
+        # ==============================================================
+
+        if not (
+            s1
+            or s2
+            or s3
+            or s4
+            or s5
+            or s6
+            or m60_trigger["pass"]
         ):
+            return None
 
-            return result
 
-        daily_clean = (
-            daily_df.dropna(
-                subset=[
-                    "Open",
-                    "High",
-                    "Low",
-                    "Close",
-                    "Volume",
-                ]
-            )
+        # ==============================================================
+        # 日K強度
+        # ==============================================================
+
+        daily_strength = calculate_daily_strength(
+            daily_df
         )
 
-        if len(daily_clean) < 120:
 
-            return result
+        # ==============================================================
+        # 最新價格
+        # ==============================================================
 
-        result["price"] = safe_float(
-            daily_clean[
-                "Close"
-            ].iloc[-1]
+        latest_price = np.nan
+
+        if not daily_df.empty:
+            latest_price = safe_float(
+                daily_df["close"].iloc[-1]
+            )
+
+
+        return {
+
+            "code": code,
+            "name": name,
+
+            "label": get_stock_label(
+                code,
+                name
+            ),
+
+            "price": latest_price,
+
+            # ----------------------------------------------------------
+            # Strategies
+            # ----------------------------------------------------------
+
+            "s1": s1,
+            "s2": s2,
+            "s3": s3,
+            "s4": s4,
+            "s5": s5,
+            "s6": s6,
+
+            # ----------------------------------------------------------
+            # 30K
+            # ----------------------------------------------------------
+
+            "m30": s1_data,
+
+            # ----------------------------------------------------------
+            # 60K
+            # ----------------------------------------------------------
+
+            "m60": s2_data,
+
+            "m60_trigger": m60_trigger,
+
+            # ----------------------------------------------------------
+            # Daily
+            # ----------------------------------------------------------
+
+            "daily": s3_data,
+
+            "daily_strength": daily_strength,
+
+            # ----------------------------------------------------------
+            # Weekly
+            # ----------------------------------------------------------
+
+            "weekly": {
+                "zero_cross": weekly_zero,
+                "kd": weekly_kd
+            },
+
+            # ----------------------------------------------------------
+            # Monthly
+            # ----------------------------------------------------------
+
+            "monthly": {
+                "zero_cross": monthly_zero,
+                "kd": monthly_kd
+            }
+        }
+
+    except Exception as e:
+
+        print(
+            f"⚠️ {code} 掃描錯誤：{e}"
         )
 
-        # ======================================================================
-        # 策略3：日K
-        # ======================================================================
-
-        s3, _, info3 = (
-            check_macd_above_zero_kd(
-                daily_clean,
-                KD_DAILY_THRESHOLD,
-            )
-        )
-
-        result["s3"] = s3
-        result["daily"] = info3
-
-        # ======================================================================
-        # 策略4：週K
-        # ======================================================================
-
-        if (
-            weekly_df is not None
-            and
-            not weekly_df.empty
-        ):
-
-            s4, _, info4 = (
-                check_macd_above_zero_kd(
-                    weekly_df,
-                    KD_WEEKLY_THRESHOLD,
-                )
-            )
-
-            result["s4"] = s4
-            result["weekly"] = info4
-
-        # ======================================================================
-        # 策略5：月K
-        # ======================================================================
-
-        if (
-            monthly_df is not None
-            and
-            not monthly_df.empty
-        ):
-
-            s5, _, info5 = (
-                check_macd_above_zero_kd(
-                    monthly_df,
-                    KD_MONTHLY_THRESHOLD,
-                )
-            )
-
-            result["s5"] = s5
-            result["monthly"] = info5
-
-        # ======================================================================
-        # ⭐ 策略7：S3 + S4 + S5
-        # ======================================================================
-
-        result["s7"] = (
-            check_strategy_7_resonance(
-                result["s3"],
-                result["s4"],
-                result["s5"],
-            )
-        )
-
-        # ======================================================================
-        # 策略6：低檔爆量
-        # ======================================================================
-
-        s6, _, info6 = (
-            check_strat_orig_8(
-                daily_clean
-            )
-        )
-
-        result["s6"] = s6
-
-        # ======================================================================
-        # 策略1：30m
-        # ======================================================================
-
-        if (
-            m30_df is not None
-            and
-            not m30_df.empty
-        ):
-
-            s1, _, info1 = (
-                check_macd_negative_reducing_kd(
-                    m30_df,
-                    KD_INTRADAY_THRESHOLD,
-                )
-            )
-
-            result["s1"] = s1
-            result["m30"] = info1
-
-        # ======================================================================
-        # 策略2：60m
-        # ======================================================================
-
-        if (
-            m60_df is not None
-            and
-            not m60_df.empty
-        ):
-
-            s2, _, info2 = (
-                check_macd_negative_reducing_kd(
-                    m60_df,
-                    KD_INTRADAY_THRESHOLD,
-                )
-            )
-
-            result["s2"] = s2
-            result["m60"] = info2
-
-            # --------------------------------------------------------------
-            # 🔥 額外60分鐘綠柱 → 紅柱判斷
-            # --------------------------------------------------------------
-
-            result[
-                "m60_trigger"
-            ] = check_60m_macd_transition(
-                m60_df
-            )
-
-        # ======================================================================
-        # 綜合評分
-        # ======================================================================
-
-        result["score"] = (
-            calculate_strategy_score(
-
-                {
-                    "s1":
-                        result["s1"],
-
-                    "s2":
-                        result["s2"],
-
-                    "s3":
-                        result["s3"],
-
-                    "s4":
-                        result["s4"],
-
-                    "s5":
-                        result["s5"],
-
-                    "s6":
-                        result["s6"],
-
-                    "s7":
-                        result["s7"],
-                },
-
-                daily_info=
-                    result["daily"],
-
-                weekly_info=
-                    result["weekly"],
-
-                monthly_info=
-                    result["monthly"],
-
-                m30_info=
-                    result["m30"],
-
-                m60_info=
-                    result["m60"],
-            )
-        )
-
-        result["grade"] = (
-            get_grade(
-                result["score"]
-            )
-        )
-
-        return result
-
-    except Exception:
-
-        return result
+        return None
 
 
 # ==============================================================================
-# 🧹 日K初篩
+# 策略評分
+# ==============================================================================
+
+def calculate_strategy_score(
+    item: Dict[str, Any]
+) -> int:
+
+    score = 0
+
+    # --------------------------------------------------------------
+    # 基本策略
+    # --------------------------------------------------------------
+
+    if item["s1"]:
+        score += 10
+
+    if item["s2"]:
+        score += 10
+
+    if item["s3"]:
+        score += 15
+
+    if item["s4"]:
+        score += 15
+
+    if item["s5"]:
+        score += 15
+
+    if item["s6"]:
+        score += 20
+
+
+    # --------------------------------------------------------------
+    # 零軸突破
+    # --------------------------------------------------------------
+
+    weekly_zero = (
+        item["weekly"]["zero_cross"]
+    )
+
+    monthly_zero = (
+        item["monthly"]["zero_cross"]
+    )
+
+    if weekly_zero["crossed"]:
+        score += 5
+
+    if monthly_zero["crossed"]:
+        score += 5
+
+
+    # --------------------------------------------------------------
+    # KD 黃金交叉
+    # --------------------------------------------------------------
+
+    if item["daily"]["golden_cross"]:
+        score += 3
+
+    if item["weekly"]["kd"]["golden_cross"]:
+        score += 3
+
+    if item["monthly"]["kd"]["golden_cross"]:
+        score += 3
+
+
+    # --------------------------------------------------------------
+    # 60K MACD
+    # --------------------------------------------------------------
+
+    trigger = item["m60_trigger"]
+
+    if trigger["green_shrinking"]:
+        score += 5
+
+    if trigger["green_to_red"]:
+        score += 10
+
+
+    # --------------------------------------------------------------
+    # 多週期共振 + 60K
+    # --------------------------------------------------------------
+
+    if (
+        item["s6"]
+        and trigger["green_shrinking"]
+    ):
+        score += 10
+
+    if (
+        item["s6"]
+        and trigger["green_to_red"]
+    ):
+        score += 15
+
+
+    return min(
+        score,
+        100
+    )
+
+
+# ==============================================================================
+# 評級
+# ==============================================================================
+
+def get_grade(
+    score: int
+) -> str:
+
+    if score >= 80:
+        return "S"
+
+    if score >= 65:
+        return "A"
+
+    if score >= 50:
+        return "B"
+
+    if score >= 35:
+        return "C"
+
+    return "D"
+
+
+# ==============================================================================
+# 建立 30K / 60K 掃描池
 # ==============================================================================
 
 def build_intraday_scan_pool(
-    tickers,
-    full_daily,
-):
+    results: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
 
-    candidates = []
+    def rank_key(item):
 
-    print(
-        "🔎 開始建立 30m / 60m 精掃名單..."
-    )
-
-    for ticker in tickers:
-
-        try:
-
-            df_d = (
-                extract_ticker_df(
-                    full_daily,
-                    ticker,
-                )
-            )
-
-            if df_d.empty:
-                continue
-
-            clean = df_d.dropna(
-                subset=[
-                    "Close",
-                    "High",
-                    "Low",
-                    "Open",
-                    "Volume",
-                ]
-            )
-
-            if len(clean) < 120:
-                continue
-
-            volume_ma20 = (
-                clean["Volume"]
-                .astype(float)
-                .rolling(20)
-                .mean()
-                .iloc[-1]
-            )
-
-            if (
-                volume_ma20
-                < MIN_AVG_VOLUME_20
-            ):
-
-                continue
-
-            strength, info = (
-                calculate_daily_strength(
-                    clean
-                )
-            )
-
-            price = info.get(
-                "price",
-                0,
-            )
-
-            ma20 = info.get(
-                "ma20",
-                0,
-            )
-
-            if price <= ma20:
-                continue
-
-            candidates.append(
-                (
-                    ticker,
-                    strength,
-                )
-            )
-
-        except Exception:
-
-            continue
-
-    candidates.sort(
-        key=lambda x: x[1],
-        reverse=True,
-    )
-
-    selected = [
-        ticker
-        for ticker, _
-        in candidates[
-            :INTRADAY_SCAN_LIMIT
-        ]
-    ]
-
-    print(
-        f"✅ 日K初篩："
-        f"{len(candidates)} 檔"
-    )
-
-    print(
-        f"🎯 30m/60m 精掃："
-        f"{len(selected)} 檔"
-    )
-
-    if candidates:
-
-        print(
-            "🏆 Top 10："
+        strategy_priority = (
+            6 if item["s6"]
+            else 5 if item["s5"]
+            else 4 if item["s4"]
+            else 3 if item["s3"]
+            else 0
         )
 
-        for rank, (
-            ticker,
-            strength,
-        ) in enumerate(
-            candidates[:10],
-            1,
-        ):
-
-            print(
-                f"   {rank:02d}. "
-                f"{ticker} "
-                f"Strength={strength:.1f}"
+        return (
+            strategy_priority,
+            item.get(
+                "daily_strength",
+                0
             )
+        )
 
-    return selected
+    return sorted(
+        results,
+        key=rank_key,
+        reverse=True
+    )
 
 
 # ==============================================================================
-# 💬 Telegram
+# Telegram
 # ==============================================================================
 
 def send_telegram_message(
-    message,
-    max_length=3500,
-):
+    message: str
+) -> bool:
 
-    bot_token = os.environ.get(
+    token = os.getenv(
         "TG_BOT_TOKEN"
     )
 
-    chat_id = os.environ.get(
+    chat_id = os.getenv(
         "TG_CHAT_ID"
     )
 
-    if (
-        not bot_token
-        or not chat_id
-    ):
+    if not token or not chat_id:
 
         print(
-            "❌ 未設定 "
-            "TG_BOT_TOKEN / TG_CHAT_ID"
+            "⚠️ 未設定 TG_BOT_TOKEN / TG_CHAT_ID"
         )
 
         return False
 
     url = (
-        "https://api.telegram.org/"
-        f"bot{str(bot_token).strip()}/"
-        "sendMessage"
+        f"https://api.telegram.org/"
+        f"bot{token}/sendMessage"
     )
 
-    lines = message.split("\n")
+    payload = {
+        "chat_id": chat_id,
+        "text": message,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True
+    }
 
-    chunks = []
+    try:
 
-    current = ""
-
-    for line in lines:
-
-        candidate = (
-            current
-            + line
-            + "\n"
+        response = requests.post(
+            url,
+            json=payload,
+            timeout=20
         )
 
-        if len(candidate) > max_length:
+        response.raise_for_status()
 
-            if current:
+        return True
 
-                chunks.append(
-                    current
-                )
+    except Exception as e:
 
-            current = (
-                line
-                + "\n"
-            )
-
-        else:
-
-            current = candidate
-
-    if current:
-
-        chunks.append(
-            current
+        print(
+            f"❌ Telegram 發送失敗：{e}"
         )
 
-    success = True
-
-    for idx, chunk in enumerate(
-        chunks,
-        1,
-    ):
-
-        payload = {
-
-            "chat_id":
-                str(
-                    chat_id
-                ).strip(),
-
-            "text":
-                chunk.strip(),
-
-            "parse_mode":
-                "HTML",
-
-            "disable_web_page_preview":
-                True,
-        }
-
-        try:
-
-            response = requests.post(
-                url,
-                json=payload,
-                timeout=15,
-            )
-
-            data = response.json()
-
-            if (
-                response.status_code == 200
-                and
-                data.get("ok")
-            ):
-
-                print(
-                    f"✅ Telegram "
-                    f"{idx}/{len(chunks)} "
-                    f"發送成功"
-                )
-
-            else:
-
-                success = False
-
-                print(
-                    f"❌ Telegram 發送失敗："
-                    f"{data}"
-                )
-
-        except Exception as e:
-
-            success = False
-
-            print(
-                f"❌ Telegram 連線失敗："
-                f"{e}"
-            )
-
-        time.sleep(0.5)
-
-    return success
+        return False
 
 
 # ==============================================================================
-# 📝 Telegram 報告
+# Telegram 報告
 # ==============================================================================
 
 def build_telegram_report(
-    results,
-    scan_count,
-    elapsed,
-    now_tw,
-):
+    results: List[Dict[str, Any]]
+) -> str:
 
-    active_results = [
-        r
-        for r in results
-        if any(
-            r.get(
-                f"s{i}",
-                False,
+    if not results:
+
+        return (
+            f"🇹🇼 台股選股 {VERSION}\n\n"
+            "本次沒有符合條件的股票。"
+        )
+
+
+    # --------------------------------------------------------------
+    # 計算分數
+    # --------------------------------------------------------------
+
+    for item in results:
+
+        item["score"] = (
+            calculate_strategy_score(
+                item
             )
-            for i in range(1, 8)
         )
-    ]
 
-    active_results.sort(
-        key=lambda x: (
-            x["score"],
-            x.get("s7", False),
-        ),
-        reverse=True,
-    )
-
-    # ==========================================================================
-    # ⭐ S7 三週期共振
-    # ==========================================================================
-
-    resonance_results = [
-        r
-        for r in results
-        if r.get(
-            "s7",
-            False,
+        item["grade"] = (
+            get_grade(
+                item["score"]
+            )
         )
-    ]
 
-    resonance_results.sort(
+
+    # --------------------------------------------------------------
+    # 排序
+    # --------------------------------------------------------------
+
+    results = sorted(
+        results,
         key=lambda x: x["score"],
-        reverse=True,
+        reverse=True
     )
 
-    # ==========================================================================
-    # 🔥 S7 + 60m 綠→紅
-    # ==========================================================================
 
-    strongest_results = []
+    # --------------------------------------------------------------
+    # 分類
+    # --------------------------------------------------------------
 
-    for r in resonance_results:
+    def get_list(
+        condition
+    ):
 
-        trigger = r.get(
-            "m60_trigger",
-            {}
-        )
+        return [
+            x for x in results
+            if condition(x)
+        ]
 
-        if trigger.get(
-            "green_to_red",
-            False,
-        ):
 
-            strongest_results.append(
-                r
-            )
+    s6_red = get_list(
+        lambda x:
+            x["s6"]
+            and x["m60_trigger"]["green_to_red"]
+    )
 
-    # ==========================================================================
-    # 🟢 S7 + 60m 綠柱縮小
-    # ==========================================================================
+    s6_shrink = get_list(
+        lambda x:
+            x["s6"]
+            and x["m60_trigger"]["green_shrinking"]
+    )
 
-    resonance_shrinking = []
+    s6_all = get_list(
+        lambda x: x["s6"]
+    )
 
-    for r in resonance_results:
+    s3_list = get_list(
+        lambda x: x["s3"]
+    )
 
-        trigger = r.get(
-            "m60_trigger",
-            {}
-        )
+    s4_list = get_list(
+        lambda x: x["s4"]
+    )
 
-        if (
-            trigger.get(
-                "green_shrinking",
-                False,
-            )
-            and
-            not trigger.get(
-                "green_to_red",
-                False,
-            )
-        ):
+    s5_list = get_list(
+        lambda x: x["s5"]
+    )
 
-            resonance_shrinking.append(
-                r
-            )
+    m60_shrink = get_list(
+        lambda x:
+            x["m60_trigger"]["green_shrinking"]
+    )
+
+    m60_red = get_list(
+        lambda x:
+            x["m60_trigger"]["green_to_red"]
+    )
+
+
+    # --------------------------------------------------------------
+    # 報告
+    # --------------------------------------------------------------
 
     lines = []
 
     lines.append(
-        "🇹🇼 "
-        "<b>【台股 7 大策略選股 Pro v2.1】</b>"
+        f"🇹🇼 <b>台股選股 {VERSION}</b>"
     )
 
     lines.append(
-        f"⚙️ Version："
-        f"<code>{VERSION}</code>"
+        "━━━━━━━━━━━━━━━━"
     )
 
     lines.append(
-        "⚠️ 已過濾 20日均量 < 1000張"
+        f"符合股票：<b>{len(results)}</b> 檔"
     )
-
-    lines.append(
-        f"⏰ {now_tw}"
-    )
-
-    lines.append(
-        "──────────────────"
-    )
-
-    lines.append(
-        f"🔎 全市場掃描："
-        f"<b>{scan_count}</b> 檔"
-    )
-
-    lines.append(
-        f"🎯 多策略命中："
-        f"<b>{len(active_results)}</b> 檔"
-    )
-
-    lines.append(
-        f"⭐ S3+S4+S5共振："
-        f"<b>{len(resonance_results)}</b> 檔"
-    )
-
-    lines.append(
-        f"🔥 共振＋60分綠→紅："
-        f"<b>{len(strongest_results)}</b> 檔"
-    )
-
-    lines.append(
-        f"⏱ 耗時："
-        f"<b>{elapsed:.1f}</b> 秒"
-    )
-
-    # ==========================================================================
-    # 🔥 最強
-    # ==========================================================================
 
     lines.append("")
 
     lines.append(
-        "🔥 <b>【最強訊號】"
-        "S3＋S4＋S5＋60分綠→紅</b>"
+        "🎯 <b>核心選股邏輯</b>"
     )
-
-    if not strongest_results:
-
-        lines.append(
-            "↳ 今日無符合標的。"
-        )
-
-    else:
-
-        for rank, result in enumerate(
-            strongest_results[:30],
-            1,
-        ):
-
-            label = get_stock_label(
-                result["ticker"]
-            )
-
-            trigger = result[
-                "m60_trigger"
-            ]
-
-            lines.append(
-                f"{rank:02d}. 🔥 "
-                f"{label} "
-                f"[{result['price']:.2f}] "
-                f"<b>{result['score']}分</b>"
-            )
-
-            lines.append(
-                "    ↳ "
-                "日＋週＋月共振 "
-                "｜60分綠柱→紅柱 "
-                f"Hist={trigger.get('hist', 0):.4f}"
-            )
-
-    # ==========================================================================
-    # 🟢 共振＋綠柱縮小
-    # ==========================================================================
-
-    lines.append("")
 
     lines.append(
-        "🟢 <b>【S3＋S4＋S5共振】"
-        "＋60分綠柱縮小</b>"
+        "月K突破0 → 週K突破0 → 日K多方 → "
+        "60K綠柱縮小→紅柱"
     )
-
-    if not resonance_shrinking:
-
-        lines.append(
-            "↳ 今日無符合標的。"
-        )
-
-    else:
-
-        for rank, result in enumerate(
-            resonance_shrinking[:30],
-            1,
-        ):
-
-            label = get_stock_label(
-                result["ticker"]
-            )
-
-            trigger = result[
-                "m60_trigger"
-            ]
-
-            lines.append(
-                f"{rank:02d}. 🟢 "
-                f"{label} "
-                f"[{result['price']:.2f}] "
-                f"<b>{result['score']}分</b>"
-            )
-
-            lines.append(
-                "    ↳ "
-                "日＋週＋月共振 "
-                "｜60分綠柱縮小 "
-                f"Hist={trigger.get('hist', 0):.4f}"
-            )
-
-    # ==========================================================================
-    # ⭐ 策略7
-    # ==========================================================================
 
     lines.append("")
 
-    lines.append(
-        "⭐ <b>【策略7】"
-        "日K＋週K＋月K三週期共振</b>"
-    )
+    # --------------------------------------------------------------
+    # S6 + 60K 紅
+    # --------------------------------------------------------------
 
-    if not resonance_results:
-
-        lines.append(
-            "↳ 今日無符合標的。"
-        )
-
-    else:
-
-        values = []
-
-        for result in resonance_results[:30]:
-
-            label = get_stock_label(
-                result["ticker"]
-            )
-
-            values.append(
-                f"{label}"
-                f"[{result['price']:.2f}]"
-                f"({result['score']}分)"
-            )
+    if s6_red:
 
         lines.append(
-            "↳ "
-            + "、".join(values)
+            "🔥 <b>S6 + 60K 綠柱→紅柱</b>"
         )
 
-    # ==========================================================================
-    # 🏆 綜合排名
-    # ==========================================================================
-
-    lines.append("")
-
-    lines.append(
-        "🏆 <b>【多策略綜合排名】</b>"
-    )
-
-    if not active_results:
-
-        lines.append(
-            "↳ 今日無符合標的。 💤"
-        )
-
-    else:
-
-        for rank, result in enumerate(
-            active_results[:30],
-            1,
-        ):
-
-            ticker = result[
-                "ticker"
-            ]
-
-            label = get_stock_label(
-                ticker
-            )
-
-            score = result[
-                "score"
-            ]
-
-            grade = result[
-                "grade"
-            ]
-
-            price = result[
-                "price"
-            ]
-
-            strategies = []
-
-            for i in range(1, 8):
-
-                if result.get(
-                    f"s{i}",
-                    False,
-                ):
-
-                    strategies.append(
-                        f"S{i}"
-                    )
-
-            strategy_text = (
-                " ".join(
-                    strategies
-                )
-            )
+        for item in s6_red[:10]:
 
             lines.append(
-                f"{rank:02d}. "
-                f"{grade} "
-                f"{label} "
-                f"[{price:.2f}] "
-                f"<b>{score}分</b>"
-            )
-
-            lines.append(
-                f"    ↳ "
-                f"{strategy_text}"
-            )
-
-    # ==========================================================================
-    # 📈 七大策略
-    # ==========================================================================
-
-    lines.append("")
-
-    strategy_titles = {
-
-        1:
-            "30分K MACD負值減少 + KD > 20",
-
-        2:
-            "60分K MACD負值減少 + KD > 20",
-
-        3:
-            "日K MACD > 0 + KD > 20",
-
-        4:
-            "週K MACD > 0 + KD > 50",
-
-        5:
-            "月K MACD > 0 + KD > 50",
-
-        6:
-            "低檔爆量股",
-
-        7:
-            "⭐ 日K＋週K＋月K三週期共振",
-    }
-
-    icons = {
-
-        1: "📈",
-        2: "📊",
-        3: "📈",
-        4: "📊",
-        5: "🌕",
-        6: "💥",
-        7: "⭐",
-    }
-
-    for strategy_no in range(
-        1,
-        8,
-    ):
-
-        matched = [
-            r
-            for r in results
-            if r.get(
-                f"s{strategy_no}",
-                False,
-            )
-        ]
-
-        matched.sort(
-            key=lambda x: x["score"],
-            reverse=True,
-        )
-
-        lines.append(
-            f"{icons[strategy_no]} "
-            f"<b>【策略{strategy_no}】"
-            f"{strategy_titles[strategy_no]}"
-            f"</b>"
-        )
-
-        if not matched:
-
-            lines.append(
-                "↳ 今日無符合標的。 💤"
-            )
-
-        else:
-
-            values = []
-
-            for result in matched[:30]:
-
-                label = get_stock_label(
-                    result["ticker"]
-                )
-
-                values.append(
-                    f"{label}"
-                    f"[{result['price']:.2f}]"
-                    f"({result['score']}分)"
-                )
-
-            lines.append(
-                "↳ "
-                + "、".join(values)
+                format_stock_line(item)
             )
 
         lines.append("")
 
-    # ==========================================================================
-    # 📌 判讀方式
-    # ==========================================================================
+
+    # --------------------------------------------------------------
+    # S6 + 60K 縮小
+    # --------------------------------------------------------------
+
+    if s6_shrink:
+
+        lines.append(
+            "🚀 <b>S6 + 60K 綠柱縮小</b>"
+        )
+
+        for item in s6_shrink[:10]:
+
+            lines.append(
+                format_stock_line(item)
+            )
+
+        lines.append("")
+
+
+    # --------------------------------------------------------------
+    # S6
+    # --------------------------------------------------------------
+
+    if s6_all:
+
+        lines.append(
+            "💎 <b>S6 多週期共振</b>"
+        )
+
+        for item in s6_all[:10]:
+
+            lines.append(
+                format_stock_line(item)
+            )
+
+        lines.append("")
+
+
+    # --------------------------------------------------------------
+    # S3
+    # --------------------------------------------------------------
+
+    if s3_list:
+
+        lines.append(
+            "📈 <b>S3 日K多方</b>"
+        )
+
+        for item in s3_list[:10]:
+
+            lines.append(
+                format_stock_line(item)
+            )
+
+        lines.append("")
+
+
+    # --------------------------------------------------------------
+    # S4
+    # --------------------------------------------------------------
+
+    if s4_list:
+
+        lines.append(
+            "📊 <b>S4 週K突破</b>"
+        )
+
+        for item in s4_list[:10]:
+
+            lines.append(
+                format_stock_line(item)
+            )
+
+        lines.append("")
+
+
+    # --------------------------------------------------------------
+    # S5
+    # --------------------------------------------------------------
+
+    if s5_list:
+
+        lines.append(
+            "🗓 <b>S5 月K突破</b>"
+        )
+
+        for item in s5_list[:10]:
+
+            lines.append(
+                format_stock_line(item)
+            )
+
+        lines.append("")
+
+
+    # --------------------------------------------------------------
+    # 60K 綠柱縮小
+    # --------------------------------------------------------------
+
+    if m60_shrink:
+
+        lines.append(
+            "🟢 <b>60K MACD 綠柱縮小</b>"
+        )
+
+        for item in m60_shrink[:10]:
+
+            lines.append(
+                format_stock_line(item)
+            )
+
+        lines.append("")
+
+
+    # --------------------------------------------------------------
+    # 60K 綠轉紅
+    # --------------------------------------------------------------
+
+    if m60_red:
+
+        lines.append(
+            "🔴 <b>60K MACD 綠柱→紅柱</b>"
+        )
+
+        for item in m60_red[:10]:
+
+            lines.append(
+                format_stock_line(item)
+            )
+
+        lines.append("")
+
+
+    # --------------------------------------------------------------
+    # Top 20
+    # --------------------------------------------------------------
 
     lines.append(
-        "──────────────────"
+        "🏆 <b>Top 20</b>"
+    )
+
+    for i, item in enumerate(
+        results[:20],
+        1
+    ):
+
+        lines.append(
+            f"{i}. "
+            f"{escape_html(item['label'])} "
+            f"｜{item['grade']} "
+            f"{item['score']}分"
+        )
+
+    lines.append("")
+
+    lines.append(
+        "━━━━━━━━━━━━━━━━"
     )
 
     lines.append(
-        "💡 <b>Pro v2.1 判讀方式</b>"
-    )
-
-    lines.append(
-        "• S7 = S3＋S4＋S5 同時成立"
-    )
-
-    lines.append(
-        "• S7 代表日／週／月三週期多方共振"
-    )
-
-    lines.append(
-        "• ⭐ S7後再觀察60分MACD"
-    )
-
-    lines.append(
-        "• 🟢 綠柱縮小＝準備發動"
-    )
-
-    lines.append(
-        "• 🔥 綠柱→紅柱＝最強觸發"
-    )
-
-    lines.append(
-        "• MACD突破0軸會額外加分"
-    )
-
-    lines.append(
-        "• KD黃金交叉會額外加分"
-    )
-
-    lines.append(
-        "• S7三週期共振額外＋10分"
+        "⚠️ 僅供技術分析參考，不構成投資建議"
     )
 
     return "\n".join(lines)
 
 
 # ==============================================================================
-# 🚀 MAIN
+# 股票格式
+# ==============================================================================
+
+def format_stock_line(
+    item: Dict[str, Any]
+) -> str:
+
+    label = escape_html(
+        item["label"]
+    )
+
+    price = item.get(
+        "price",
+        np.nan
+    )
+
+    if np.isnan(price):
+
+        price_text = "-"
+
+    else:
+
+        price_text = (
+            f"{price:.2f}"
+        )
+
+    score = item.get(
+        "score",
+        0
+    )
+
+    grade = item.get(
+        "grade",
+        "-"
+    )
+
+    flags = []
+
+    if item["s1"]:
+        flags.append("30K")
+
+    if item["s2"]:
+        flags.append("60K")
+
+    if item["s3"]:
+        flags.append("日")
+
+    if item["s4"]:
+        flags.append("週")
+
+    if item["s5"]:
+        flags.append("月")
+
+    trigger = item["m60_trigger"]
+
+    if trigger["green_to_red"]:
+        flags.append("60K轉紅")
+
+    elif trigger["green_shrinking"]:
+        flags.append("60K縮柱")
+
+    strategy_text = (
+        ",".join(flags)
+        if flags
+        else "-"
+    )
+
+    return (
+        f"• <b>{label}</b> "
+        f"｜{price_text} "
+        f"｜{grade} {score}分 "
+        f"｜{strategy_text}"
+    )
+
+
+# ==============================================================================
+# 主程式
 # ==============================================================================
 
 def main():
 
-    start_time = time.time()
-
-    now_tw = (
-        pd.Timestamp.now(
-            tz="UTC"
-        )
-        .tz_convert(
-            "Asia/Taipei"
-        )
+    print(
+        "=" * 70
     )
-
-    now_tw_str = now_tw.strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
-
-    print("")
-    print("=" * 70)
 
     print(
-        "🇹🇼 台股 7 大策略選股 Pro v2.1"
+        f"🇹🇼 台股 6 大策略選股 {VERSION}"
     )
-
-    print("=" * 70)
 
     print(
-        f"⏰ {now_tw_str}"
+        "=" * 70
     )
-
-    print("")
-
-    # ==========================================================================
-    # STEP 1
-    # ==========================================================================
 
     print(
-        "⏳ STEP 1："
-        "取得台股全市場股票清單"
+        "📌 30K KD > 50"
     )
 
-    tickers = (
+    print(
+        "📌 60K KD > 50"
+    )
+
+    print(
+        "📌 日K KD > 20"
+    )
+
+    print(
+        "📌 週K KD > 50"
+    )
+
+    print(
+        "📌 月K KD > 50"
+    )
+
+    print(
+        "📌 S6 = 日K + 週K + 月K"
+    )
+
+    print(
+        "=" * 70
+    )
+
+
+    # ==================================================================
+    # 取得股票清單
+    # ==================================================================
+
+    market_df = (
         fetch_all_taiwan_market_tickers()
     )
 
-    if not tickers:
+    if market_df.empty:
 
         print(
-            "❌ 無法取得股票清單，程式結束"
+            "❌ 無法取得股票清單"
         )
 
         return
 
-    # ==========================================================================
-    # STEP 2
-    # ==========================================================================
 
-    print("")
     print(
-        "⏳ STEP 2："
-        "下載日K / 週K / 月K"
+        f"📊 市場股票數：{len(market_df)}"
     )
 
-    full_daily = safe_download_yf(
-        tickers,
-        period="1y",
-        interval="1d",
-        chunk_size=DAILY_CHUNK_SIZE,
-    )
 
-    if full_daily.empty:
+    # ==================================================================
+    # 建立股票名稱
+    # ==================================================================
 
-        print(
-            "❌ 日K資料下載失敗"
+    for _, row in market_df.iterrows():
+
+        code = str(
+            row["code"]
         )
 
-        return
+        name = str(
+            row.get(
+                "name",
+                ""
+            )
+        )
 
-    full_weekly = safe_download_yf(
-        tickers,
-        period="2y",
-        interval="1wk",
-        chunk_size=DAILY_CHUNK_SIZE,
+        DYNAMIC_STOCK_NAMES[
+            code
+        ] = name
+
+
+    codes = (
+        market_df["code"]
+        .astype(str)
+        .tolist()
     )
 
-    full_monthly = safe_download_yf(
-        tickers,
-        period="5y",
-        interval="1mo",
-        chunk_size=DAILY_CHUNK_SIZE,
-    )
 
-    # ==========================================================================
-    # STEP 3
-    # 日K初篩
-    # ==========================================================================
+    # ==================================================================
+    # 第一階段：
+    # 日K掃描
+    # ==================================================================
 
-    print("")
+    daily_results = []
+
+    total = len(codes)
+
     print(
-        "⏳ STEP 3："
-        "日K流動性 + 技術強度初篩"
+        "🔎 開始日K掃描..."
     )
 
-    intraday_pool = (
-        build_intraday_scan_pool(
-            tickers,
-            full_daily,
-        )
-    )
 
-    # ==========================================================================
-    # STEP 4
-    # 下載30m / 60m
-    # ==========================================================================
-
-    full_30m = pd.DataFrame()
-    full_60m = pd.DataFrame()
-
-    if intraday_pool:
-
-        print("")
-
-        print(
-            f"⏳ STEP 4："
-            f"下載 {len(intraday_pool)} 檔 "
-            f"30m / 60m"
-        )
-
-        full_30m = safe_download_yf(
-            intraday_pool,
-            period="1mo",
-            interval="30m",
-            chunk_size=INTRADAY_CHUNK_SIZE,
-        )
-
-        full_60m = safe_download_yf(
-            intraday_pool,
-            period="1mo",
-            interval="60m",
-            chunk_size=INTRADAY_CHUNK_SIZE,
-        )
-
-    # ==========================================================================
-    # STEP 5
-    # 全策略掃描
-    # ==========================================================================
-
-    print("")
-    print(
-        "⏳ STEP 5："
-        "執行 7 大策略"
-    )
-
-    results = []
-
-    strategy_counter = {
-
-        "s1": 0,
-        "s2": 0,
-        "s3": 0,
-        "s4": 0,
-        "s5": 0,
-        "s6": 0,
-        "s7": 0,
-    }
-
-    for index, ticker in enumerate(
-        tickers,
-        1,
+    for start in range(
+        0,
+        total,
+        DAILY_CHUNK_SIZE
     ):
 
-        try:
+        chunk_codes = codes[
+            start:
+            start + DAILY_CHUNK_SIZE
+        ]
 
-            # ------------------------------------------------------------------
-            # 日K
-            # ------------------------------------------------------------------
+        tickers = [
+            get_ticker_code(c)
+            for c in chunk_codes
+        ]
 
-            df_daily = (
-                extract_ticker_df(
-                    full_daily,
-                    ticker,
-                )
+        print(
+            f"📥 日K："
+            f"{start + 1}-"
+            f"{min(start + DAILY_CHUNK_SIZE, total)}"
+            f"/{total}"
+        )
+
+
+        data = safe_download_yf(
+            tickers,
+            period="2y",
+            interval="1d"
+        )
+
+
+        for code, ticker in zip(
+            chunk_codes,
+            tickers
+        ):
+
+            df = normalize_dataframe(
+                data,
+                ticker
             )
 
-            if df_daily.empty:
+            if df.empty:
                 continue
 
-            clean_daily = (
-                df_daily.dropna(
-                    subset=[
-                        "Close",
-                        "High",
-                        "Low",
-                        "Open",
-                        "Volume",
-                    ]
-                )
-            )
-
-            if len(clean_daily) < 120:
+            if len(df) < 60:
                 continue
 
-            # ------------------------------------------------------------------
-            # 流動性
-            # ------------------------------------------------------------------
 
-            volume_ma20 = (
-                clean_daily[
-                    "Volume"
-                ]
-                .astype(float)
-                .rolling(20)
+            # ----------------------------------------------------------
+            # 成交量過濾
+            # ----------------------------------------------------------
+
+            avg_volume = (
+                df["volume"]
+                .tail(20)
                 .mean()
-                .iloc[-1]
             )
 
             if (
-                volume_ma20
+                np.isnan(avg_volume)
+                or avg_volume
                 < MIN_AVG_VOLUME_20
             ):
-
                 continue
 
-            # ------------------------------------------------------------------
-            # 週K
-            # ------------------------------------------------------------------
 
-            df_weekly = (
-                extract_ticker_df(
-                    full_weekly,
-                    ticker,
+            # ----------------------------------------------------------
+            # 日K
+            # ----------------------------------------------------------
+
+            daily_check = (
+                check_macd_above_zero_kd(
+                    df,
+                    DAILY_KD_THRESHOLD
                 )
             )
 
-            # ------------------------------------------------------------------
-            # 月K
-            # ------------------------------------------------------------------
 
-            df_monthly = (
-                extract_ticker_df(
-                    full_monthly,
-                    ticker,
-                )
+            # ----------------------------------------------------------
+            # 即使日K沒有 S3，
+            # 後續仍可能因為週/月策略進入。
+            #
+            # 先保留所有高流動性股票。
+            # ----------------------------------------------------------
+
+            name = DYNAMIC_STOCK_NAMES.get(
+                code,
+                ""
             )
 
-            # ------------------------------------------------------------------
-            # 30m
-            # ------------------------------------------------------------------
+            daily_results.append({
+                "code": code,
+                "name": name,
+                "daily_df": df,
+                "daily_pass": daily_check["pass"],
+                "daily_strength":
+                    calculate_daily_strength(df)
+            })
 
-            df_30m = pd.DataFrame()
 
-            if ticker in intraday_pool:
+    print(
+        f"✅ 日K初篩完成："
+        f"{len(daily_results)} 檔"
+    )
 
-                df_30m = (
-                    extract_ticker_df(
-                        full_30m,
-                        ticker,
-                    )
-                )
 
-            # ------------------------------------------------------------------
-            # 60m
-            # ------------------------------------------------------------------
+    if not daily_results:
 
-            df_60m = pd.DataFrame()
+        print(
+            "❌ 沒有符合流動性條件的股票"
+        )
 
-            if ticker in intraday_pool:
+        return
 
-                df_60m = (
-                    extract_ticker_df(
-                        full_60m,
-                        ticker,
-                    )
-                )
 
-            # ------------------------------------------------------------------
-            # 掃描
-            # ------------------------------------------------------------------
+    # ==================================================================
+    # 第二階段：
+    # 週K / 月K
+    # ==================================================================
+
+    results = []
+
+    print(
+        "🔎 開始週K / 月K掃描..."
+    )
+
+
+    for idx, item in enumerate(
+        daily_results,
+        1
+    ):
+
+        code = item["code"]
+        name = item["name"]
+
+        ticker = get_ticker_code(
+            code
+        )
+
+        print(
+            f"📊 [{idx}/{len(daily_results)}] "
+            f"{code} {name}"
+        )
+
+
+        try:
+
+            data = safe_download_yf(
+                [ticker],
+                period="10y",
+                interval="1wk"
+            )
+
+            weekly_df = normalize_dataframe(
+                data,
+                ticker
+            )
+
+
+            data = safe_download_yf(
+                [ticker],
+                period="15y",
+                interval="1mo"
+            )
+
+            monthly_df = normalize_dataframe(
+                data,
+                ticker
+            )
+
+
+            if weekly_df.empty:
+                continue
+
+            if monthly_df.empty:
+                continue
+
+
+            # ----------------------------------------------------------
+            # 先使用空的 30K / 60K
+            #
+            # 第二階段只確認日週月。
+            # ----------------------------------------------------------
 
             result = scan_stock(
-
-                ticker=ticker,
-
-                daily_df=clean_daily,
-
-                weekly_df=df_weekly,
-
-                monthly_df=df_monthly,
-
-                m30_df=df_30m,
-
-                m60_df=df_60m,
+                code=code,
+                name=name,
+                daily_df=item["daily_df"],
+                weekly_df=weekly_df,
+                monthly_df=monthly_df,
+                m30_df=pd.DataFrame(),
+                m60_df=pd.DataFrame()
             )
 
-            # ------------------------------------------------------------------
-            # 統計
-            # ------------------------------------------------------------------
 
-            for key in strategy_counter:
+            # ----------------------------------------------------------
+            # scan_stock 需要 30K / 60K
+            #
+            # 因此這裡另外建立基礎候選。
+            # ----------------------------------------------------------
 
-                if result.get(
-                    key,
-                    False,
-                ):
+            s3 = check_macd_above_zero_kd(
+                item["daily_df"],
+                DAILY_KD_THRESHOLD
+            )
 
-                    strategy_counter[
-                        key
-                    ] += 1
-
-            # ------------------------------------------------------------------
-            # 至少命中一個策略
-            # ------------------------------------------------------------------
-
-            if any(
-                result.get(
-                    f"s{i}",
-                    False,
+            weekly_zero = (
+                get_recent_zero_cross_info(
+                    weekly_df,
+                    WEEKLY_ZERO_CROSS_LOOKBACK
                 )
-                for i in range(
-                    1,
-                    8,
+            )
+
+            weekly_kd = get_kd_state(
+                weekly_df
+            )
+
+            s4 = (
+                weekly_zero["crossed"]
+                and weekly_zero["current_above_zero"]
+                and weekly_kd["k"] > WEEKLY_KD_THRESHOLD
+                and weekly_kd["d"] > WEEKLY_KD_THRESHOLD
+            )
+
+            monthly_zero = (
+                get_recent_zero_cross_info(
+                    monthly_df,
+                    MONTHLY_ZERO_CROSS_LOOKBACK
                 )
+            )
+
+            monthly_kd = get_kd_state(
+                monthly_df
+            )
+
+            s5 = (
+                monthly_zero["crossed"]
+                and monthly_zero["current_above_zero"]
+                and monthly_kd["k"] > MONTHLY_KD_THRESHOLD
+                and monthly_kd["d"] > MONTHLY_KD_THRESHOLD
+            )
+
+
+            # ----------------------------------------------------------
+            # 只要 S3/S4/S5 任一成立，
+            # 或多週期共振，就進入 30K/60K 深度掃描池
+            # ----------------------------------------------------------
+
+            if (
+                s3["pass"]
+                or s4
+                or s5
             ):
 
-                results.append(
-                    result
-                )
+                results.append({
+
+                    "code": code,
+
+                    "name": name,
+
+                    "daily_df":
+                        item["daily_df"],
+
+                    "weekly_df":
+                        weekly_df,
+
+                    "monthly_df":
+                        monthly_df,
+
+                    "daily_strength":
+                        item["daily_strength"],
+
+                    "s3":
+                        s3["pass"],
+
+                    "s4":
+                        s4,
+
+                    "s5":
+                        s5,
+
+                    "weekly_zero":
+                        weekly_zero,
+
+                    "monthly_zero":
+                        monthly_zero,
+
+                    "weekly_kd":
+                        weekly_kd,
+
+                    "monthly_kd":
+                        monthly_kd
+                })
+
 
         except Exception as e:
 
             print(
-                f"⚠️ {ticker} "
-                f"掃描異常：{e}"
+                f"⚠️ {code} 週/月K錯誤：{e}"
             )
 
             continue
 
-        # ----------------------------------------------------------------------
-        # 每100檔顯示一次進度
-        # ----------------------------------------------------------------------
 
-        if index % 100 == 0:
+    print(
+        f"✅ 週/月K初篩："
+        f"{len(results)} 檔"
+    )
 
-            print(
-                f"   掃描進度 "
-                f"{index}/{len(tickers)}"
-            )
 
-    # ==========================================================================
-    # STEP 6
-    # 排序
-    # ==========================================================================
+    # ==================================================================
+    # 第三階段：
+    # 排序後下載 30K / 60K
+    # ==================================================================
 
-    results.sort(
+    results = sorted(
+        results,
         key=lambda x: (
-            x["score"],
-            x.get(
-                "s7",
-                False,
-            ),
-            x["price"],
+            x["s3"] +
+            x["s4"] +
+            x["s5"],
+            x["daily_strength"]
         ),
-        reverse=True,
+        reverse=True
     )
 
-    # ==========================================================================
-    # 統計
-    # ==========================================================================
 
-    elapsed = (
-        time.time()
-        - start_time
-    )
+    results = results[
+        :INTRADAY_SCAN_LIMIT
+    ] if "INTRADAY_SCAN_LIMIT" in globals() else results[:100]
 
-    print("")
-    print("=" * 70)
 
     print(
-        "🏁 掃描完成"
+        f"🚀 進入 30K / 60K 深度掃描："
+        f"{len(results)} 檔"
     )
 
-    print("=" * 70)
 
-    print(
-        f"📊 全市場："
-        f"{len(tickers)}"
-    )
+    final_results = []
 
-    print(
-        f"🎯 30m/60m精掃："
-        f"{len(intraday_pool)}"
-    )
 
-    print(
-        f"🔥 多策略命中："
-        f"{len(results)}"
-    )
-
-    print("")
-
-    for key, count in (
-        strategy_counter.items()
+    for idx, item in enumerate(
+        results,
+        1
     ):
+
+        code = item["code"]
+        name = item["name"]
+
+        ticker = get_ticker_code(
+            code
+        )
 
         print(
-            f"{key.upper()}："
-            f"{count}"
+            f"⏱ [{idx}/{len(results)}] "
+            f"{code} {name}"
         )
 
-    # ==========================================================================
-    # ⭐ S7 統計
-    # ==========================================================================
 
-    resonance_count = (
-        strategy_counter["s7"]
-    )
+        try:
 
-    strongest_count = 0
-    shrinking_count = 0
+            # ----------------------------------------------------------
+            # 30分鐘
+            # ----------------------------------------------------------
 
-    for result in results:
+            data30 = safe_download_yf(
+                [ticker],
+                period="60d",
+                interval="30m"
+            )
 
-        if not result.get(
-            "s7",
-            False,
-        ):
-            continue
+            m30_df = normalize_dataframe(
+                data30,
+                ticker
+            )
 
-        trigger = result.get(
-            "m60_trigger",
-            {}
-        )
 
-        if trigger.get(
-            "green_to_red",
-            False,
-        ):
+            # ----------------------------------------------------------
+            # 60分鐘
+            # ----------------------------------------------------------
 
-            strongest_count += 1
+            data60 = safe_download_yf(
+                [ticker],
+                period="730d",
+                interval="60m"
+            )
 
-        elif trigger.get(
-            "green_shrinking",
-            False,
-        ):
+            m60_df = normalize_dataframe(
+                data60,
+                ticker
+            )
 
-            shrinking_count += 1
 
-    print("")
-    print(
-        "⭐ S7三週期共振："
-        f"{resonance_count}"
-    )
+            # ----------------------------------------------------------
+            # 最終掃描
+            # ----------------------------------------------------------
 
-    print(
-        "🟢 S7＋60分綠柱縮小："
-        f"{shrinking_count}"
-    )
+            result = scan_stock(
 
-    print(
-        "🔥 S7＋60分綠→紅："
-        f"{strongest_count}"
-    )
+                code=code,
 
-    print(
-        f"⏱ 總耗時："
-        f"{elapsed:.1f} 秒"
-    )
+                name=name,
 
-    # ==========================================================================
-    # TOP 20
-    # ==========================================================================
+                daily_df=item[
+                    "daily_df"
+                ],
 
-    print("")
-    print(
-        "🏆 TOP 20"
-    )
+                weekly_df=item[
+                    "weekly_df"
+                ],
 
-    for rank, result in enumerate(
-        results[:20],
-        1,
-    ):
+                monthly_df=item[
+                    "monthly_df"
+                ],
 
-        strategies = []
+                m30_df=m30_df,
 
-        for i in range(
-            1,
-            8,
-        ):
+                m60_df=m60_df
+            )
 
-            if result.get(
-                f"s{i}",
-                False,
-            ):
 
-                strategies.append(
-                    f"S{i}"
+            if result is not None:
+
+                final_results.append(
+                    result
                 )
 
-        trigger = result.get(
-            "m60_trigger",
-            {}
-        )
 
-        trigger_status = (
-            trigger.get(
-                "status",
-                "",
+        except Exception as e:
+
+            print(
+                f"⚠️ {code} 30K/60K錯誤：{e}"
+            )
+
+            continue
+
+
+    # ==================================================================
+    # 排序
+    # ==================================================================
+
+    for item in final_results:
+
+        item["score"] = (
+            calculate_strategy_score(
+                item
             )
         )
 
-        print(
-            f"{rank:02d}. "
-            f"{get_ticker_code(result['ticker'])} "
-            f"{result['name']} "
-            f"{result['price']:.2f} "
-            f"| {result['score']}分 "
-            f"| {' '.join(strategies)} "
-            f"| {trigger_status}"
+        item["grade"] = (
+            get_grade(
+                item["score"]
+            )
         )
 
-    # ==========================================================================
-    # STEP 7
+
+    final_results = sorted(
+        final_results,
+        key=lambda x: x["score"],
+        reverse=True
+    )
+
+
+    # ==================================================================
+    # 顯示
+    # ==================================================================
+
+    print(
+        "\n"
+        + "=" * 70
+    )
+
+    print(
+        f"🎯 最終符合："
+        f"{len(final_results)} 檔"
+    )
+
+    print(
+        "=" * 70
+    )
+
+
+    for i, item in enumerate(
+        final_results[:50],
+        1
+    ):
+
+        print(
+            f"{i:02d}. "
+            f"{item['label']} "
+            f"| {item['grade']} "
+            f"{item['score']}分 "
+            f"| "
+            f"S1={item['s1']} "
+            f"S2={item['s2']} "
+            f"S3={item['s3']} "
+            f"S4={item['s4']} "
+            f"S5={item['s5']} "
+            f"S6={item['s6']} "
+            f"| "
+            f"60K縮柱="
+            f"{item['m60_trigger']['green_shrinking']} "
+            f"轉紅="
+            f"{item['m60_trigger']['green_to_red']}"
+        )
+
+
+    # ==================================================================
     # Telegram
-    # ==========================================================================
+    # ==================================================================
 
-    print("")
+    if final_results:
+
+        report = build_telegram_report(
+            final_results
+        )
+
+        send_telegram_message(
+            report
+        )
+
+    else:
+
+        report = build_telegram_report(
+            []
+        )
+
+        send_telegram_message(
+            report
+        )
+
+
     print(
-        "⏳ STEP 7："
-        "建立 Telegram 報告"
+        "\n"
+        + "=" * 70
     )
 
-    report = build_telegram_report(
-        results=results,
-        scan_count=len(tickers),
-        elapsed=elapsed,
-        now_tw=now_tw_str,
-    )
-
-    send_telegram_message(
-        report
-    )
-
-    print("")
     print(
-        "✅ 台股 7 大策略選股 "
-        "Pro v2.1 完成"
+        "✅ 選股完成"
+    )
+
+    print(
+        "=" * 70
     )
 
 
 # ==============================================================================
-# 程式入口
+# Entry
 # ==============================================================================
 
 if __name__ == "__main__":
-
     main()
+```
