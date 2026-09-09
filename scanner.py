@@ -67,7 +67,7 @@ def safe_download_yf(tickers, period, interval, chunk_size=250):
     return pd.DataFrame()
 
 # ==============================================================================
-# 📊 技術指標算術模組
+# 📊 技術指標算術模組（嚴謹修正版）
 # ==============================================================================
 def calculate_macd(close_series, fast=12, slow=26, signal=9):
     fast_ema = close_series.ewm(span=fast, adjust=False).mean()
@@ -77,68 +77,105 @@ def calculate_macd(close_series, fast=12, slow=26, signal=9):
     return macd_line, signal_line, macd_line - signal_line
 
 def calculate_kd(df_single, n=9, m1=3, m2=3):
-    low_min = df_single['Low'].astype(float).rolling(window=n).min()
-    high_max = df_single['High'].astype(float).rolling(window=n).max()
-    close = df_single['Close'].astype(float)
-    rsv = (((close - low_min) / (high_max - low_min)) * 100).fillna(50)
-    k_list, d_list = [50.0], [50.0]
-    for i in range(1, len(rsv)):
-        k_list.append((k_list[-1] * (m1 - 1) + rsv.iloc[i]) / m1)
-        d_list.append((d_list[-1] * (m2 - 1) + k_list[-1]) / m2)
-    return pd.Series(k_list, index=df_single.index), pd.Series(d_list, index=df_single.index)
+    """ 嚴謹計算 KD 值，確保傳回正確對齊的 Series """
+    df_clean = df_single[['High', 'Low', 'Close']].dropna().astype(float)
+    if len(df_clean) < n:
+        return pd.Series(dtype=float), pd.Series(dtype=float)
+
+    low_min = df_clean['Low'].rolling(window=n).min()
+    high_max = df_clean['High'].rolling(window=n).max()
+    close = df_clean['Close']
+    
+    denom = high_max - low_min
+    rsv = (((close - low_min) / denom) * 100).fillna(50)
+    
+    k_vals = []
+    d_vals = []
+    k_prev, d_prev = 50.0, 50.0
+    
+    for val in rsv:
+        k_curr = (k_prev * (m1 - 1) + val) / m1
+        d_curr = (d_prev * (m2 - 1) + k_curr) / m2
+        k_vals.append(k_curr)
+        d_vals.append(d_curr)
+        k_prev, d_prev = k_curr, d_curr
+        
+    return pd.Series(k_vals, index=df_clean.index), pd.Series(d_vals, index=df_clean.index)
 
 # ==============================================================================
-# 🎯 策略判斷邏輯
+# 🎯 策略判斷邏輯（精準無漏驗版）
 # ==============================================================================
 def check_macd_negative_reducing_kd(df_tf, kd_threshold=20):
-    """ 策略一 / 二：MACD 負值減少（負柱狀體向上收斂） + KD > kd_threshold """
+    """ 策略一 / 二：MACD 負值減少 + KD > kd_threshold """
     try:
-        if df_tf.empty or len(df_tf) < 30: return False, 0.0
-        c_tf = df_tf['Close'].squeeze().astype(float)
+        df_clean = df_tf.dropna(subset=['Close', 'High', 'Low'])
+        if len(df_clean) < 30: return False, 0.0
+        c_tf = df_clean['Close'].astype(float)
 
         macd_line, signal_line, hist = calculate_macd(c_tf)
         
-        # 條件 1: MACD 負值減少（柱狀圖小於 0 但比上一根大，或快線小於 0 但在上升）
+        # 條件 1: MACD 負值減少
         is_hist_negative_reducing = (hist.iloc[-1] < 0) and (hist.iloc[-1] > hist.iloc[-2])
         is_macd_negative_up = (macd_line.iloc[-1] < 0) and (macd_line.iloc[-1] > macd_line.iloc[-2])
         is_macd_cond = is_hist_negative_reducing or is_macd_negative_up
 
         # 條件 2: KD > kd_threshold
-        k_ser, d_ser = calculate_kd(df_tf)
-        is_kd_cond = (k_ser.iloc[-1] > kd_threshold) and (d_ser.iloc[-1] > kd_threshold)
+        k_ser, d_ser = calculate_kd(df_clean)
+        if k_ser.empty or d_ser.empty: return False, 0.0
+        
+        k_val = k_ser.iloc[-1]
+        d_val = d_ser.iloc[-1]
+        is_kd_cond = (k_val > kd_threshold) and (d_val > kd_threshold)
 
         if is_macd_cond and is_kd_cond:
             return True, c_tf.iloc[-1]
-    except: pass
+    except Exception as e:
+        pass
     return False, 0.0
 
 def check_macd_above_zero_kd(df_tf, kd_threshold=20):
-    """ 策略三 / 四 / 五：MACD > 0（快線大於零軸） + KD > kd_threshold """
+    """ 策略三 / 四 / 五：MACD > 0 + KD > kd_threshold """
     try:
-        if df_tf.empty or len(df_tf) < 30: return False, 0.0
-        c_tf = df_tf['Close'].squeeze().astype(float)
+        df_clean = df_tf.dropna(subset=['Close', 'High', 'Low'])
+        if len(df_clean) < 30: return False, 0.0
+        c_tf = df_clean['Close'].astype(float)
 
+        # 檢查 MACD > 0
         macd_line, signal_line, hist = calculate_macd(c_tf)
-        is_macd_above_zero = macd_line.iloc[-1] > 0
+        macd_val = macd_line.iloc[-1]
+        if pd.isna(macd_val) or macd_val <= 0:
+            return False, 0.0
 
-        k_ser, d_ser = calculate_kd(df_tf)
-        is_kd_cond = (k_ser.iloc[-1] > kd_threshold) and (d_ser.iloc[-1] > kd_threshold)
+        # 檢查 KD 雙線 > kd_threshold
+        k_ser, d_ser = calculate_kd(df_clean)
+        if k_ser.empty or d_ser.empty: return False, 0.0
+        
+        k_val = k_ser.iloc[-1]
+        d_val = d_ser.iloc[-1]
+        
+        if pd.isna(k_val) or pd.isna(d_val):
+            return False, 0.0
 
-        if is_macd_above_zero and is_kd_cond:
+        # 嚴格驗證：K 與 D 均須大於指定門檻
+        if (k_val > kd_threshold) and (d_val > kd_threshold):
             return True, c_tf.iloc[-1]
-    except: pass
+    except Exception as e:
+        pass
     return False, 0.0
 
 def check_strat_orig_8(df_daily):
-    """ 策略六（原策略八）：低檔爆量股 """
+    """ 策略六：低檔爆量股 """
     try:
-        c_daily = df_daily['Close'].squeeze().astype(float)
-        v_daily = df_daily['Volume'].squeeze().astype(float)
-        o_daily = df_daily['Open'].squeeze().astype(float)
+        df_clean = df_daily.dropna(subset=['Close', 'High', 'Low', 'Open', 'Volume'])
+        if len(df_clean) < 120: return False, 0.0
+        
+        c_daily = df_clean['Close'].astype(float)
+        v_daily = df_clean['Volume'].astype(float)
+        o_daily = df_clean['Open'].astype(float)
 
         low_120 = c_daily.rolling(window=120).min().iloc[-1]
         high_120 = c_daily.rolling(window=120).max().iloc[-1]
-        if high_120 == low_120: return False, 0.0
+        if high_120 == low_120 or pd.isna(low_120) or pd.isna(high_120): return False, 0.0
 
         price_position = (c_daily.iloc[-1] - low_120) / (high_120 - low_120)
         is_low_position = price_position <= 0.30
@@ -150,11 +187,12 @@ def check_strat_orig_8(df_daily):
 
         if is_low_position and is_volume_surge and is_red_k:
             return True, c_daily.iloc[-1]
-    except: pass
+    except Exception as e:
+        pass
     return False, 0.0
 
 # ==============================================================================
-# 💬 Telegram 發送模組 (含長訊息自動切分)
+# 💬 Telegram 發送模組
 # ==============================================================================
 def send_telegram_message(message, max_length=3500):
     bot_token = os.environ.get("TG_BOT_TOKEN")
@@ -220,7 +258,7 @@ if __name__ == "__main__":
         try:
             if ticker not in full_df_daily.columns.levels[1]: continue
             df_d = full_df_daily.xs(ticker, axis=1, level=1)
-            if df_d.empty or len(df_d) < 120: continue 
+            if df_d.empty or len(df_d.dropna(subset=['Close'])) < 120: continue 
             
             # 核心防線：20日均量 >= 1000張
             if df_d['Volume'].rolling(window=20).mean().iloc[-1] / 1000 < 1000: continue
@@ -238,25 +276,26 @@ if __name__ == "__main__":
                 df_w = full_df_weekly.xs(ticker, axis=1, level=1)
                 res4, price4 = check_macd_above_zero_kd(df_w, kd_threshold=50)
                 if res4:
-                    strat4.append(f"{stock_label}[{df_d['Close'].iloc[-1]:.2f}元]")
+                    strat4.append(f"{stock_label}[{df_d['Close'].dropna().iloc[-1]:.2f}元]")
 
             # 🛠️ 【策略五：月K MACD > 0 + KD > 50】
             if ticker in full_df_monthly.columns.levels[1]:
                 df_m = full_df_monthly.xs(ticker, axis=1, level=1)
                 res5, price5 = check_macd_above_zero_kd(df_m, kd_threshold=50)
                 if res5:
-                    strat5.append(f"{stock_label}[{df_d['Close'].iloc[-1]:.2f}元]")
+                    strat5.append(f"{stock_label}[{df_d['Close'].dropna().iloc[-1]:.2f}元]")
 
-            # 🛠️ 【策略六：原策略八 (低檔爆量股)】
+            # 🛠️ 【策略六：低檔爆量股】
             res6, price6 = check_strat_orig_8(df_d)
             if res6:
                 strat6.append(f"{stock_label}[{price6:.2f}元]")
 
             # 收集適合下載 30m / 60m K線的精選名單
-            if df_d['Close'].iloc[-1] > df_d['Close'].rolling(20).mean().iloc[-1]:
+            if df_d['Close'].dropna().iloc[-1] > df_d['Close'].rolling(20).mean().iloc[-1]:
                 heavy_scan_pool.append(ticker)
 
-        except: continue
+        except Exception as e:
+            continue
 
     # ⏳ 步驟 3: 下載 30分K 與 60分K 資料
     final_heavy_pool = heavy_scan_pool[:50]
@@ -283,7 +322,8 @@ if __name__ == "__main__":
                     res2, price2 = check_macd_negative_reducing_kd(df_m60, kd_threshold=20)
                     if res2: 
                         strat2.append(f"{stock_label}[{price2:.2f}元]")
-            except: continue
+            except Exception as e:
+                continue
 
     # 📝 Telegram 報告組裝
     tw_msg = f"🇹🇼 <b>【台股 6 大多頭選股報告】</b>\n⚠️ <i>已過濾 20日均量 &lt; 1000張之殭屍股</i>\n⏰ 時間: {tw_time_str}\n"
