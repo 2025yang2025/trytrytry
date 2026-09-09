@@ -117,41 +117,42 @@ def get_stock_label(code: str, name: Optional[str] = None) -> str:
 # TWSE 股票清單取得
 # ==============================================================================
 def fetch_all_taiwan_market_tickers() -> pd.DataFrame:
-    try:
-        response = requests.get(TWSE_API_URL, headers=REQUEST_HEADERS, timeout=20)
-        response.raise_for_status()
-        data = response.json()
-        if not data:
-            return pd.DataFrame()
-
-        df = pd.DataFrame(data)
-        if "證券代號" in df.columns:
-            df = df.rename(
-                columns={
-                    "證券代號": "code",
-                    "證券名稱": "name",
-                    "成交股數": "volume",
-                    "成交金額": "turnover",
-                }
-            )
-
-        if "code" not in df.columns:
-            return pd.DataFrame()
-
-        df["code"] = df["code"].astype(str).str.strip()
-
-        # 只保留一般 4 碼股票
-        df = df[df["code"].str.match(r"^\d{4}$", na=False)].copy()
-
-        if "name" in df.columns:
-            df["name"] = df["name"].astype(str).str.strip()
-        else:
-            df["name"] = ""
-
-        return df
-    except Exception as e:
-        print(f"❌ 取得 TWSE 股票清單失敗：{e}")
-        return pd.DataFrame()
+    # 嘗試 API 1: TWSE OpenAPI STOCK_DAY_ALL
+    url_1 = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
+    # 嘗試 API 2: TWSE 備用 OpenAPI (BWIBBU_d 包含所有上市個股代號)
+    url_2 = "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_d"
+    
+    for url in [url_1, url_2]:
+        try:
+            response = requests.get(url, headers=REQUEST_HEADERS, timeout=15)
+            if response.status_code == 200:
+                data = response.json()
+                if data and isinstance(data, list):
+                    df = pd.DataFrame(data)
+                    
+                    # 相容不同的 API 欄位名稱
+                    code_col = next((c for c in ['證券代號', 'Code', 'code'] if c in df.columns), None)
+                    name_col = next((c for c in ['證券名稱', 'Name', 'name'] if c in df.columns), None)
+                    
+                    if code_col:
+                        df = df.rename(columns={code_col: "code"})
+                        if name_col:
+                            df = df.rename(columns={name_col: "name"})
+                        else:
+                            df["name"] = ""
+                            
+                        df["code"] = df["code"].astype(str).str.strip()
+                        # 只篩選 4 碼純數字的普通股
+                        df = df[df["code"].str.match(r"^\d{4}$", na=False)].copy()
+                        
+                        if not df.empty:
+                            print(f"✅ 成功從 {url.split('/')[-1]} 取得 {len(df)} 檔股票資訊")
+                            return df
+        except Exception as e:
+            print(f"⚠️ 嘗試讀取 {url} 失敗: {e}")
+            
+    print("❌ 無法取得 TWSE 股票清單")
+    return pd.DataFrame()
 
 # ==============================================================================
 # Safe Yahoo Finance Download
