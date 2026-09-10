@@ -105,7 +105,7 @@ def calculate_kd(df_single, n=9, m1=3, m2=3):
 # ==============================================================================
 # 🎯 策略判斷邏輯
 # ==============================================================================
-def check_macd_above_zero_kd(df_tf, kd_threshold=30):
+def check_macd_above_zero_kd(df_tf, kd_threshold=25):
     """ 判斷 MACD > 0 且 KD 雙線 > kd_threshold """
     try:
         df_clean = df_tf.dropna(subset=['Close', 'High', 'Low'])
@@ -130,7 +130,7 @@ def check_macd_above_zero_kd(df_tf, kd_threshold=30):
         pass
     return False, 0.0
 
-def check_macd_negative_reducing_kd(df_tf, kd_threshold=40):
+def check_macd_negative_reducing_kd(df_tf, kd_threshold=30):
     """ 策略四：60分K MACD 綠柱縮小（柱狀體負值且向上增加） + KD > kd_threshold """
     try:
         df_clean = df_tf.dropna(subset=['Close', 'High', 'Low'])
@@ -155,8 +155,8 @@ def check_macd_negative_reducing_kd(df_tf, kd_threshold=40):
         pass
     return False, 0.0
 
-def check_strat_5_30m(df_30m, df_daily, kd_threshold=40):
-    """ 策略五：30分K MACD > 0 + KD > kd_threshold + 價格站上日K 5日均線 """
+def check_strat_5_30m(df_30m, df_daily, kd_threshold=30):
+    """ 策略五：30分K MACD 綠柱縮小 + KD > kd_threshold + 價格站上日K 5日均線 """
     try:
         df_clean_30m = df_30m.dropna(subset=['Close', 'High', 'Low'])
         df_clean_d = df_daily.dropna(subset=['Close'])
@@ -166,12 +166,13 @@ def check_strat_5_30m(df_30m, df_daily, kd_threshold=40):
 
         c_30m = df_clean_30m['Close'].astype(float)
         
-        # 1. 30分K MACD > 0
-        macd_line, _, _ = calculate_macd(c_30m)
-        if pd.isna(macd_line.iloc[-1]) or macd_line.iloc[-1] <= 0:
+        # 1. 30分K MACD 綠柱縮小
+        _, _, hist = calculate_macd(c_30m)
+        is_hist_negative_reducing = (hist.iloc[-1] < 0) and (hist.iloc[-1] > hist.iloc[-2])
+        if not is_hist_negative_reducing:
             return False, 0.0
 
-        # 2. 30分K KD > kd_threshold (40)
+        # 2. 30分K KD > kd_threshold (30)
         k_ser, d_ser = calculate_kd(df_clean_30m)
         if k_ser.empty or d_ser.empty: return False, 0.0
         if k_ser.iloc[-1] <= kd_threshold or d_ser.iloc[-1] <= kd_threshold:
@@ -238,7 +239,7 @@ if __name__ == "__main__":
     now_tw = pd.Timestamp.now(tz='UTC').tz_convert('Asia/Taipei')
     tw_time_str = now_tw.strftime('%Y-%m-%d %H:%M:%S')
 
-    print("🚀 啟動【台股 5 大多頭選股系統】...")
+    print("🚀 啟動【台股 6 大精準選股系統】...")
     tech_scan_pool = fetch_all_taiwan_market_tickers()
 
     print(f"⏳ 步驟 1: 下載全市場日K、週K與月K資料 (共 {len(tech_scan_pool)} 檔)...")
@@ -246,7 +247,8 @@ if __name__ == "__main__":
     full_df_weekly = safe_download_yf(tech_scan_pool, period="2y", interval="1wk", chunk_size=250)
     full_df_monthly = safe_download_yf(tech_scan_pool, period="5y", interval="1mo", chunk_size=250)
 
-    strat1, strat2, strat3, strat4, strat5 = [], [], [], [], []
+    strat1, strat2, strat3 = [], [], []
+    strat4_map, strat5_map = {}, {}
     heavy_scan_pool = []
 
     print("⏳ 步驟 2: 進行月K、週K、日K策略篩選...")
@@ -262,22 +264,22 @@ if __name__ == "__main__":
             name_zh = DYNAMIC_STOCK_NAMES.get(ticker, "")
             stock_label = f"<code>{ticker}</code>(<i>{name_zh}</i>)" if name_zh else f"<code>{ticker}</code>"
 
-            # 🛠️ 【策略一：月K MACD > 0 + KD > 30】
+            # 🛠️ 【策略一：月K MACD > 0 + KD > 25】
             if ticker in full_df_monthly.columns.levels[1]:
                 df_m = full_df_monthly.xs(ticker, axis=1, level=1)
-                res1, _ = check_macd_above_zero_kd(df_m, kd_threshold=30)
+                res1, _ = check_macd_above_zero_kd(df_m, kd_threshold=25)
                 if res1:
                     strat1.append(f"{stock_label}[{df_d['Close'].dropna().iloc[-1]:.2f}元]")
 
-            # 🛠️ 【策略二：週K MACD > 0 + KD > 30】
+            # 🛠️ 【策略二：週K MACD > 0 + KD > 25】
             if ticker in full_df_weekly.columns.levels[1]:
                 df_w = full_df_weekly.xs(ticker, axis=1, level=1)
-                res2, _ = check_macd_above_zero_kd(df_w, kd_threshold=30)
+                res2, _ = check_macd_above_zero_kd(df_w, kd_threshold=25)
                 if res2:
                     strat2.append(f"{stock_label}[{df_d['Close'].dropna().iloc[-1]:.2f}元]")
 
-            # 🛠️ 【策略三：日K MACD > 0 + KD > 30】
-            res3, price3 = check_macd_above_zero_kd(df_d, kd_threshold=30)
+            # 🛠️ 【策略三：日K MACD > 0 + KD > 25】
+            res3, price3 = check_macd_above_zero_kd(df_d, kd_threshold=25)
             if res3:
                 strat3.append(f"{stock_label}[{price3:.2f}元]")
 
@@ -301,41 +303,51 @@ if __name__ == "__main__":
                 stock_label = f"<code>{ticker}</code>(<i>{name_zh}</i>)" if name_zh else f"<code>{ticker}</code>"
                 df_d = full_df_daily.xs(ticker, axis=1, level=1)
 
-                # 🛠️ 【策略四：60分K MACD綠柱縮小 + KD > 40】
+                # 🛠️ 【策略四：60分K MACD綠柱縮小 + KD > 30】
                 if ticker in full_df_60m.columns.levels[1]:
                     df_m60 = full_df_60m.xs(ticker, axis=1, level=1)
-                    res4, price4 = check_macd_negative_reducing_kd(df_m60, kd_threshold=40)
+                    res4, price4 = check_macd_negative_reducing_kd(df_m60, kd_threshold=30)
                     if res4: 
-                        strat4.append(f"{stock_label}[{price4:.2f}元]")
+                        strat4_map[ticker] = f"{stock_label}[{price4:.2f}元]"
 
-                # 🛠️ 【策略五：30分K MACD > 0 + KD > 40 + 站上5日線】
+                # 🛠️ 【策略五：30分K MACD綠柱縮小 + KD > 30 + 站上5日線】
                 if ticker in full_df_30m.columns.levels[1]:
                     df_m30 = full_df_30m.xs(ticker, axis=1, level=1)
-                    res5, price5 = check_strat_5_30m(df_m30, df_d, kd_threshold=40)
+                    res5, price5 = check_strat_5_30m(df_m30, df_d, kd_threshold=30)
                     if res5:
-                        strat5.append(f"{stock_label}[{price5:.2f}元]")
+                        strat5_map[ticker] = f"{stock_label}[{price5:.2f}元]"
 
             except Exception:
                 continue
 
+    # 🛠️ 【策略六：策略四與策略五重疊的標的】
+    strat6_tickers = set(strat4_map.keys()) & set(strat5_map.keys())
+    strat6 = [strat4_map[t] for t in strat6_tickers]
+
+    strat4 = list(strat4_map.values())
+    strat5 = list(strat5_map.values())
+
     # 📝 Telegram 報告組裝
-    tw_msg = f"🇹🇼 <b>【台股 5 大精準選股報告】</b>\n⚠️ <i>已過濾 20日均量 &lt; 1000張之股票</i>\n⏰ 時間: {tw_time_str}\n"
+    tw_msg = f"🇹🇼 <b>【台股 6 大精準選股報告】</b>\n⚠️ <i>已過濾 20日均量 &lt; 1000張之股票</i>\n⏰ 時間: {tw_time_str}\n"
     tw_msg += "───────────────────\n\n"
     
-    tw_msg += "🌕 <b>【策略一】月K MACD &gt; 0 + KD &gt; 30</b>\n"
+    tw_msg += "🌕 <b>【策略一】月K MACD &gt; 0 + KD &gt; 25</b>\n"
     tw_msg += f"↳ {', '.join(strat1) if strat1 else '無符合標的。 💤'}\n\n"
 
-    tw_msg += "📊 <b>【策略二】週K MACD &gt; 0 + KD &gt; 30</b>\n"
+    tw_msg += "📊 <b>【策略二】週K MACD &gt; 0 + KD &gt; 25</b>\n"
     tw_msg += f"↳ {', '.join(strat2) if strat2 else '無符合標的。 💤'}\n\n"
 
-    tw_msg += "📈 <b>【策略三】日K MACD &gt; 0 + KD &gt; 30</b>\n"
+    tw_msg += "📈 <b>【策略三】日K MACD &gt; 0 + KD &gt; 25</b>\n"
     tw_msg += f"↳ {', '.join(strat3) if strat3 else '無符合標的。 💤'}\n\n"
 
-    tw_msg += "⏱️ <b>【策略四】60分K MACD綠柱縮小 + KD &gt; 40</b>\n"
+    tw_msg += "⏱️ <b>【策略四】60分K MACD綠柱縮小 + KD &gt; 30</b>\n"
     tw_msg += f"↳ {', '.join(strat4) if strat4 else '無符合標的。 💤'}\n\n"
 
-    tw_msg += "⚡ <b>【策略五】30分K MACD &gt; 0 + KD &gt; 40 + 站上5日線</b>\n"
-    tw_msg += f"↳ {', '.join(strat5) if strat5 else '無符合標的。 💤'}\n"
+    tw_msg += "⚡ <b>【策略五】30分K MACD綠柱縮小 + KD &gt; 30 + 站上5日線</b>\n"
+    tw_msg += f"↳ {', '.join(strat5) if strat5 else '無符合標的。 💤'}\n\n"
+
+    tw_msg += "🎯 <b>【策略六】雙重確認（策略四 ∩ 策略五重疊標的）</b>\n"
+    tw_msg += f"↳ {', '.join(strat6) if strat6 else '無重疊標的。 💤'}\n"
 
     send_telegram_message(tw_msg)
     print(f"✅ 策略報告發送完成！總耗時: {time.time() - start_time:.1f} 秒")
