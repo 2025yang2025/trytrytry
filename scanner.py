@@ -105,7 +105,7 @@ def calculate_kd(df_single, n=9, m1=3, m2=3):
 # ==============================================================================
 # 🎯 策略判斷邏輯
 # ==============================================================================
-def check_macd_above_zero_kd(df_tf, kd_threshold=50):
+def check_macd_above_zero_kd(df_tf, kd_threshold=30):
     """ 判斷 MACD > 0 且 KD 雙線 > kd_threshold """
     try:
         df_clean = df_tf.dropna(subset=['Close', 'High', 'Low'])
@@ -131,7 +131,7 @@ def check_macd_above_zero_kd(df_tf, kd_threshold=50):
     return False, 0.0
 
 def check_macd_heading_to_zero_kd(df_tf, kd_threshold=20):
-    """ 判斷 MACD 往 0 軸向上 (MACD < 0 且勾頭向上) + KD > kd_threshold """
+    """ 判斷 MACD 往 0 軸向上 (MACD < 0 且向上增加) + KD > kd_threshold """
     try:
         df_clean = df_tf.dropna(subset=['Close', 'High', 'Low'])
         if len(df_clean) < 30: return False, 0.0
@@ -231,22 +231,22 @@ if __name__ == "__main__":
             name_zh = DYNAMIC_STOCK_NAMES.get(ticker, "")
             stock_label = f"<code>{ticker}</code>(<i>{name_zh}</i>)" if name_zh else f"<code>{ticker}</code>"
 
-            # 🛠️ 【策略一：月K MACD > 0 + KD > 50】
+            # 🛠️ 【策略一：月K MACD > 0 + KD > 30】
             if ticker in full_df_monthly.columns.levels[1]:
                 df_m = full_df_monthly.xs(ticker, axis=1, level=1)
-                res1, _ = check_macd_above_zero_kd(df_m, kd_threshold=50)
+                res1, _ = check_macd_above_zero_kd(df_m, kd_threshold=30)
                 if res1:
                     strat1_map[ticker] = f"{stock_label}[{df_d['Close'].dropna().iloc[-1]:.2f}元]"
 
-            # 🛠️ 【策略二：週K MACD > 0 + KD > 50】
+            # 🛠️ 【策略二：週K MACD > 0 + KD > 30】
             if ticker in full_df_weekly.columns.levels[1]:
                 df_w = full_df_weekly.xs(ticker, axis=1, level=1)
-                res2, _ = check_macd_above_zero_kd(df_w, kd_threshold=50)
+                res2, _ = check_macd_above_zero_kd(df_w, kd_threshold=30)
                 if res2:
                     strat2_map[ticker] = f"{stock_label}[{df_d['Close'].dropna().iloc[-1]:.2f}元]"
 
-            # 🛠️ 【策略三：日K MACD > 0 + KD > 60】
-            res3, price3 = check_macd_above_zero_kd(df_d, kd_threshold=60)
+            # 🛠️ 【策略三：日K MACD > 0 + KD > 20】
+            res3, price3 = check_macd_above_zero_kd(df_d, kd_threshold=20)
             if res3:
                 strat3_map[ticker] = f"{stock_label}[{price3:.2f}元]"
 
@@ -294,7 +294,6 @@ if __name__ == "__main__":
     strat7_tickers = set(strat1_map.keys()) & set(strat2_map.keys())
     strat7 = [strat1_map[t] for t in strat7_tickers]
 
-    # 轉回 List 以便輸出
     strat1 = list(strat1_map.values())
     strat2 = list(strat2_map.values())
     strat3 = list(strat3_map.values())
@@ -305,13 +304,13 @@ if __name__ == "__main__":
     tw_msg = f"🇹🇼 <b>【台股 7 大精準選股報告】</b>\n⚠️ <i>已過濾 20日均量 &lt; 1000張之股票</i>\n⏰ 時間: {tw_time_str}\n"
     tw_msg += "───────────────────\n\n"
     
-    tw_msg += "🌕 <b>【策略一】月K MACD &gt; 0 + KD &gt; 50</b>\n"
+    tw_msg += "🌕 <b>【策略一】月K MACD &gt; 0 + KD &gt; 30</b>\n"
     tw_msg += f"↳ {', '.join(strat1) if strat1 else '無符合標的。 💤'}\n\n"
 
-    tw_msg += "📊 <b>【策略二】週K MACD &gt; 0 + KD &gt; 50</b>\n"
+    tw_msg += "📊 <b>【策略二】週K MACD &gt; 0 + KD &gt; 30</b>\n"
     tw_msg += f"↳ {', '.join(strat2) if strat2 else '無符合標的。 💤'}\n\n"
 
-    tw_msg += "📈 <b>【策略三】日K MACD &gt; 0 + KD &gt; 60</b>\n"
+    tw_msg += "📈 <b>【策略三】日K MACD &gt; 0 + KD &gt; 20</b>\n"
     tw_msg += f"↳ {', '.join(strat3) if strat3 else '無符合標的。 💤'}\n\n"
 
     tw_msg += "⏱️ <b>【策略四】60分K MACD往0軸向上 + KD &gt; 20</b>\n"
