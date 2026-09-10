@@ -112,7 +112,7 @@ def check_macd_above_zero_kd(df_tf, kd_threshold=50):
         if len(df_clean) < 30: return False, 0.0
         c_tf = df_clean['Close'].astype(float)
 
-        macd_line, signal_line, hist = calculate_macd(c_tf)
+        macd_line, _, _ = calculate_macd(c_tf)
         macd_val = macd_line.iloc[-1]
         if pd.isna(macd_val) or macd_val <= 0:
             return False, 0.0
@@ -130,17 +130,17 @@ def check_macd_above_zero_kd(df_tf, kd_threshold=50):
         pass
     return False, 0.0
 
-def check_macd_negative_reducing_kd(df_tf, kd_threshold=20):
-    """ 判斷 MACD 綠柱縮小（柱狀體負值且向上增加） + KD > kd_threshold """
+def check_macd_heading_to_zero_kd(df_tf, kd_threshold=20):
+    """ 判斷 MACD 往 0 軸向上 (MACD < 0 且勾頭向上) + KD > kd_threshold """
     try:
         df_clean = df_tf.dropna(subset=['Close', 'High', 'Low'])
         if len(df_clean) < 30: return False, 0.0
         c_tf = df_clean['Close'].astype(float)
 
-        _, _, hist = calculate_macd(c_tf)
+        macd_line, _, _ = calculate_macd(c_tf)
         
-        # MACD 綠柱縮小 (柱狀體負值且最新一根數值大於前一根)
-        is_hist_negative_reducing = (hist.iloc[-1] < 0) and (hist.iloc[-1] > hist.iloc[-2])
+        # MACD 往 0 軸向上 (在零軸之下，且最新一筆 MACD 大於前一筆)
+        is_macd_heading_up = (macd_line.iloc[-1] < 0) and (macd_line.iloc[-1] > macd_line.iloc[-2])
 
         k_ser, d_ser = calculate_kd(df_clean)
         if k_ser.empty or d_ser.empty: return False, 0.0
@@ -149,7 +149,7 @@ def check_macd_negative_reducing_kd(df_tf, kd_threshold=20):
         d_val = d_ser.iloc[-1]
         is_kd_cond = (k_val > kd_threshold) and (d_val > kd_threshold)
 
-        if is_hist_negative_reducing and is_kd_cond:
+        if is_macd_heading_up and is_kd_cond:
             return True, c_tf.iloc[-1]
     except Exception:
         pass
@@ -269,31 +269,32 @@ if __name__ == "__main__":
                 name_zh = DYNAMIC_STOCK_NAMES.get(ticker, "")
                 stock_label = f"<code>{ticker}</code>(<i>{name_zh}</i>)" if name_zh else f"<code>{ticker}</code>"
 
-                # 🛠️ 【策略四：60分K MACD綠柱縮小 + KD > 20】
+                # 🛠️ 【策略四：60分K MACD往0軸向上 + KD > 20】
                 if ticker in full_df_60m.columns.levels[1]:
                     df_m60 = full_df_60m.xs(ticker, axis=1, level=1)
-                    res4, price4 = check_macd_negative_reducing_kd(df_m60, kd_threshold=20)
+                    res4, price4 = check_macd_heading_to_zero_kd(df_m60, kd_threshold=20)
                     if res4: 
                         strat4_map[ticker] = f"{stock_label}[{price4:.2f}元]"
 
-                # 🛠️ 【策略五：30分K MACD綠柱縮小 + KD > 20】
+                # 🛠️ 【策略五：30分K MACD往0軸向上 + KD > 20】
                 if ticker in full_df_30m.columns.levels[1]:
                     df_m30 = full_df_30m.xs(ticker, axis=1, level=1)
-                    res5, price5 = check_macd_negative_reducing_kd(df_m30, kd_threshold=20)
+                    res5, price5 = check_macd_heading_to_zero_kd(df_m30, kd_threshold=20)
                     if res5:
                         strat5_map[ticker] = f"{stock_label}[{price5:.2f}元]"
 
             except Exception:
                 continue
 
-    # 🛠️ 【策略六：策略四與策略五重疊標的】
-    strat6_tickers = set(strat4_map.keys()) & set(strat5_map.keys())
-    strat6 = [strat4_map[t] for t in strat6_tickers]
+    # 🛠️ 【策略六：策略三與策略四重疊標的 (日K ∩ 60分K)】
+    strat6_tickers = set(strat3_map.keys()) & set(strat4_map.keys())
+    strat6 = [strat3_map[t] for t in strat6_tickers]
 
-    # 🛠️ 【策略七：策略二與策略三重疊標的】
-    strat7_tickers = set(strat2_map.keys()) & set(strat3_map.keys())
-    strat7 = [strat2_map[t] for t in strat7_tickers]
+    # 🛠️ 【策略七：策略一與策略二重疊標的 (月K ∩ 週K)】
+    strat7_tickers = set(strat1_map.keys()) & set(strat2_map.keys())
+    strat7 = [strat1_map[t] for t in strat7_tickers]
 
+    # 轉回 List 以便輸出
     strat1 = list(strat1_map.values())
     strat2 = list(strat2_map.values())
     strat3 = list(strat3_map.values())
@@ -313,16 +314,16 @@ if __name__ == "__main__":
     tw_msg += "📈 <b>【策略三】日K MACD &gt; 0 + KD &gt; 60</b>\n"
     tw_msg += f"↳ {', '.join(strat3) if strat3 else '無符合標的。 💤'}\n\n"
 
-    tw_msg += "⏱️ <b>【策略四】60分K MACD綠柱縮小 + KD &gt; 20</b>\n"
+    tw_msg += "⏱️ <b>【策略四】60分K MACD往0軸向上 + KD &gt; 20</b>\n"
     tw_msg += f"↳ {', '.join(strat4) if strat4 else '無符合標的。 💤'}\n\n"
 
-    tw_msg += "⚡ <b>【策略五】30分K MACD綠柱縮小 + KD &gt; 20</b>\n"
+    tw_msg += "⚡ <b>【策略五】30分K MACD往0軸向上 + KD &gt; 20</b>\n"
     tw_msg += f"↳ {', '.join(strat5) if strat5 else '無符合標的。 💤'}\n\n"
 
-    tw_msg += "🎯 <b>【策略六】短線共振（策略四 ∩ 策略五重疊標的）</b>\n"
+    tw_msg += "🎯 <b>【策略六】日/60分級別共振（策略三 ∩ 策略四）</b>\n"
     tw_msg += f"↳ {', '.join(strat6) if strat6 else '無重疊標的。 💤'}\n\n"
 
-    tw_msg += "🔥 <b>【策略七】中長線強勢（策略二 ∩ 策略三重疊標的）</b>\n"
+    tw_msg += "🔥 <b>【策略七】長線月/週級別共振（策略一 ∩ 策略二）</b>\n"
     tw_msg += f"↳ {', '.join(strat7) if strat7 else '無重疊標的。 💤'}\n"
 
     send_telegram_message(tw_msg)
