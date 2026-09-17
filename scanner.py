@@ -105,7 +105,7 @@ def calculate_kd(df_single, n=9, m1=3, m2=3):
 # ==============================================================================
 # 🎯 策略判斷邏輯
 # ==============================================================================
-def check_macd_above_zero_kd(df_tf, kd_threshold=30):
+def check_macd_above_zero_kd(df_tf, kd_threshold=20):
     """ 判斷 MACD > 0 且 KD 雙線 > kd_threshold """
     try:
         df_clean = df_tf.dropna(subset=['Close', 'High', 'Low'])
@@ -154,6 +154,18 @@ def check_macd_heading_to_zero_kd(df_tf, kd_threshold=20):
     except Exception:
         pass
     return False, 0.0
+
+def get_kd_latest(df_tf):
+    """ 取得最新一筆 K 與 D 值 """
+    try:
+        df_clean = df_tf.dropna(subset=['Close', 'High', 'Low'])
+        if len(df_clean) < 15: return None, None
+        k_ser, d_ser = calculate_kd(df_clean)
+        if not k_ser.empty and not d_ser.empty:
+            return k_ser.iloc[-1], d_ser.iloc[-1]
+    except Exception:
+        pass
+    return None, None
 
 # ==============================================================================
 # 💬 Telegram 發送模組
@@ -206,16 +218,17 @@ if __name__ == "__main__":
     now_tw = pd.Timestamp.now(tz='UTC').tz_convert('Asia/Taipei')
     tw_time_str = now_tw.strftime('%Y-%m-%d %H:%M:%S')
 
-    print("🚀 啟動【台股 7 大精準選股系統】...")
+    print("🚀 啟動【台股 9 大精準選股系統】...")
     tech_scan_pool = fetch_all_taiwan_market_tickers()
 
-    print(f"⏳ 步驟 1: 下載全市場日K、週K與月K資料 (共 {len(tech_scan_pool)} 檔)...")
+    print(f"⏳ 步驟 1: 下載全市場日K、週K與月K資料 (共 {len(tech_scan_pool)} 档)...")
     full_df_daily = safe_download_yf(tech_scan_pool, period="1y", interval="1d", chunk_size=250)
     full_df_weekly = safe_download_yf(tech_scan_pool, period="2y", interval="1wk", chunk_size=250)
     full_df_monthly = safe_download_yf(tech_scan_pool, period="5y", interval="1mo", chunk_size=250)
 
     strat1_map, strat2_map, strat3_map = {}, {}, {}
     strat4_map, strat5_map = {}, {}
+    strat9_map = {}
     heavy_scan_pool = []
 
     print("⏳ 步驟 2: 進行月K、週K、日K策略篩選...")
@@ -225,23 +238,24 @@ if __name__ == "__main__":
             df_d = full_df_daily.xs(ticker, axis=1, level=1)
             if df_d.empty or len(df_d.dropna(subset=['Close'])) < 120: continue 
             
-            # 過濾：20日均量 >= 1000張
-            if df_d['Volume'].rolling(window=20).mean().iloc[-1] / 1000 < 1000: continue
+            # 🛠️ 修正過濾條件：20日均量 >= 1000張 (Volume 單位為股數)
+            avg_vol_20_shares = df_d['Volume'].rolling(window=20).mean().iloc[-1]
+            if (avg_vol_20_shares / 1000.0) < 1000: continue
 
             name_zh = DYNAMIC_STOCK_NAMES.get(ticker, "")
             stock_label = f"<code>{ticker}</code>(<i>{name_zh}</i>)" if name_zh else f"<code>{ticker}</code>"
 
-            # 🛠️ 【策略一：月K MACD > 0 + KD > 30】
+            # 🛠️ 【策略一：月K MACD > 0 + KD > 20】
             if ticker in full_df_monthly.columns.levels[1]:
                 df_m = full_df_monthly.xs(ticker, axis=1, level=1)
-                res1, _ = check_macd_above_zero_kd(df_m, kd_threshold=30)
+                res1, _ = check_macd_above_zero_kd(df_m, kd_threshold=20)
                 if res1:
                     strat1_map[ticker] = f"{stock_label}[{df_d['Close'].dropna().iloc[-1]:.2f}元]"
 
-            # 🛠️ 【策略二：週K MACD > 0 + KD > 30】
+            # 🛠️ 【策略二：週K MACD > 0 + KD > 50】
             if ticker in full_df_weekly.columns.levels[1]:
                 df_w = full_df_weekly.xs(ticker, axis=1, level=1)
-                res2, _ = check_macd_above_zero_kd(df_w, kd_threshold=30)
+                res2, _ = check_macd_above_zero_kd(df_w, kd_threshold=50)
                 if res2:
                     strat2_map[ticker] = f"{stock_label}[{df_d['Close'].dropna().iloc[-1]:.2f}元]"
 
@@ -250,15 +264,14 @@ if __name__ == "__main__":
             if res3:
                 strat3_map[ticker] = f"{stock_label}[{price3:.2f}元]"
 
-            # 收集適合掃描分 K 的精選名單 (股價站上 20日線)
-            if df_d['Close'].dropna().iloc[-1] > df_d['Close'].rolling(20).mean().iloc[-1]:
-                heavy_scan_pool.append(ticker)
+            # 收集適合掃描分 K 的精選名單
+            heavy_scan_pool.append(ticker)
 
         except Exception:
             continue
 
     # ⏳ 步驟 3: 下載 30分K 與 60分K 資料
-    final_heavy_pool = heavy_scan_pool[:50]
+    final_heavy_pool = heavy_scan_pool[:100]  # 彈性擴增掃描名單至 100 檔
     if final_heavy_pool:
         print(f"⏳ 步驟 3: 下載精選 {len(final_heavy_pool)} 檔標的之 30分K 與 60分K 資料...")
         full_df_30m = safe_download_yf(final_heavy_pool, period="1mo", interval="30m", chunk_size=50)
@@ -268,6 +281,7 @@ if __name__ == "__main__":
             try:
                 name_zh = DYNAMIC_STOCK_NAMES.get(ticker, "")
                 stock_label = f"<code>{ticker}</code>(<i>{name_zh}</i>)" if name_zh else f"<code>{ticker}</code>"
+                df_d = full_df_daily.xs(ticker, axis=1, level=1)
 
                 # 🛠️ 【策略四：60分K MACD往0軸向上 + KD > 20】
                 if ticker in full_df_60m.columns.levels[1]:
@@ -283,31 +297,50 @@ if __name__ == "__main__":
                     if res5:
                         strat5_map[ticker] = f"{stock_label}[{price5:.2f}元]"
 
+                # 🛠️ 【策略九：反向 - 30m, 60m, 日, 週, 月 KD 皆 < 70 且跌破日10日線】
+                close_d = df_d['Close'].dropna()
+                ma10_d = close_d.rolling(10).mean()
+                if close_d.iloc[-1] < ma10_d.iloc[-1]:  # 跌破 10 日線
+                    kd_30m_k, kd_30m_d = get_kd_latest(full_df_30m.xs(ticker, axis=1, level=1)) if ticker in full_df_30m.columns.levels[1] else (None, None)
+                    kd_60m_k, kd_60m_d = get_kd_latest(full_df_60m.xs(ticker, axis=1, level=1)) if ticker in full_df_60m.columns.levels[1] else (None, None)
+                    kd_d_k, kd_d_d = get_kd_latest(df_d)
+                    kd_w_k, kd_w_d = get_kd_latest(full_df_weekly.xs(ticker, axis=1, level=1)) if ticker in full_df_weekly.columns.levels[1] else (None, None)
+                    kd_m_k, kd_m_d = get_kd_latest(full_df_monthly.xs(ticker, axis=1, level=1)) if ticker in full_df_monthly.columns.levels[1] else (None, None)
+
+                    all_kds = [kd_30m_k, kd_30m_d, kd_60m_k, kd_60m_d, kd_d_k, kd_d_d, kd_w_k, kd_w_d, kd_m_k, kd_m_d]
+                    if all(val is not None and val < 70 for val in all_kds):
+                        strat9_map[ticker] = f"{stock_label}[{close_d.iloc[-1]:.2f}元]"
+
             except Exception:
                 continue
 
-    # 🛠️ 【策略六：策略三與策略四重疊標的 (日K ∩ 60分K)】
+    # 🛠️ 【策略六：策略三 ∩ 策略四 (日K ∩ 60分K)】
     strat6_tickers = set(strat3_map.keys()) & set(strat4_map.keys())
     strat6 = [strat3_map[t] for t in strat6_tickers]
 
-    # 🛠️ 【策略七：策略一與策略二重疊標的 (月K ∩ 週K)】
+    # 🛠️ 【策略七：策略一 ∩ 策略二 (月K ∩ 週K)】
     strat7_tickers = set(strat1_map.keys()) & set(strat2_map.keys())
     strat7 = [strat1_map[t] for t in strat7_tickers]
+
+    # 🛠️ 【策略八：策略六 ∩ 策略七】
+    strat8_tickers = strat6_tickers & strat7_tickers
+    strat8 = [strat3_map[t] for t in strat8_tickers]
 
     strat1 = list(strat1_map.values())
     strat2 = list(strat2_map.values())
     strat3 = list(strat3_map.values())
     strat4 = list(strat4_map.values())
     strat5 = list(strat5_map.values())
+    strat9 = list(strat9_map.values())
 
     # 📝 Telegram 報告組裝
-    tw_msg = f"🇹🇼 <b>【台股 7 大精準選股報告】</b>\n⚠️ <i>已過濾 20日均量 &lt; 1000張之股票</i>\n⏰ 時間: {tw_time_str}\n"
+    tw_msg = f"🇹🇼 <b>【台股 9 大精準選股報告】</b>\n⚠️ <i>已過濾 20日均量 &lt; 1000張之股票</i>\n⏰ 時間: {tw_time_str}\n"
     tw_msg += "───────────────────\n\n"
     
-    tw_msg += "🌕 <b>【策略一】月K MACD &gt; 0 + KD &gt; 30</b>\n"
+    tw_msg += "🌕 <b>【策略一】月K MACD &gt; 0 + KD &gt; 20</b>\n"
     tw_msg += f"↳ {', '.join(strat1) if strat1 else '無符合標的。 💤'}\n\n"
 
-    tw_msg += "📊 <b>【策略二】週K MACD &gt; 0 + KD &gt; 30</b>\n"
+    tw_msg += "📊 <b>【策略二】週K MACD &gt; 0 + KD &gt; 50</b>\n"
     tw_msg += f"↳ {', '.join(strat2) if strat2 else '無符合標的。 💤'}\n\n"
 
     tw_msg += "📈 <b>【策略三】日K MACD &gt; 0 + KD &gt; 20</b>\n"
@@ -323,7 +356,13 @@ if __name__ == "__main__":
     tw_msg += f"↳ {', '.join(strat6) if strat6 else '無重疊標的。 💤'}\n\n"
 
     tw_msg += "🔥 <b>【策略七】長線月/週級別共振（策略一 ∩ 策略二）</b>\n"
-    tw_msg += f"↳ {', '.join(strat7) if strat7 else '無重疊標的。 💤'}\n"
+    tw_msg += f"↳ {', '.join(strat7) if strat7 else '無重疊標的。 💤'}\n\n"
+
+    tw_msg += "💎 <b>【策略八】多週期全強勢共振（策略六 ∩ 策略七）</b>\n"
+    tw_msg += f"↳ {', '.join(strat8) if strat8 else '無重疊標的。 💤'}\n\n"
+
+    tw_msg += "❄️ <b>【策略九】反向弱勢防守（全週期 KD &lt; 70 且跌破10日線）</b>\n"
+    tw_msg += f"↳ {', '.join(strat9) if strat9 else '無符合標的。 💤'}\n"
 
     send_telegram_message(tw_msg)
     print(f"✅ 策略報告發送完成！總耗時: {time.time() - start_time:.1f} 秒")
