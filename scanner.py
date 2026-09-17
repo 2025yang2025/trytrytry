@@ -240,7 +240,7 @@ if __name__ == "__main__":
             df_d = full_df_daily.xs(ticker, axis=1, level=1)
             if df_d.empty or len(df_d.dropna(subset=['Close'])) < 120: continue 
             
-            # 🛠️ 過濾條件：20日均量 >= 1000張 (Volume / 1000)
+            # 🛠️ 嚴格門檻：20日均量 >= 1000張 (Volume / 1000.0 >= 1000)
             avg_vol_20_shares = df_d['Volume'].rolling(window=20).mean().iloc[-1]
             if (avg_vol_20_shares / 1000.0) < 1000: continue
 
