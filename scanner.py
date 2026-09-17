@@ -5,12 +5,12 @@ import os
 import time
 
 # ==============================================================================
-# 🇹🇼 台股全市場快速資料下載模組
+# 🇹🇼 台股全市場快速資料下載模組 (含 ETF 過濾)
 # ==============================================================================
 DYNAMIC_STOCK_NAMES = {}
 
 def fetch_all_taiwan_market_tickers():
-    """ 下載全台股市場代碼與名稱 """
+    """ 下載全台股市場代碼與名稱，並排除 ETF """
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
     all_tickers = []
     
@@ -21,7 +21,9 @@ def fetch_all_taiwan_market_tickers():
             for item in res.json():
                 code = item.get("Code", "").strip()
                 name = item.get("Name", "").strip()
-                if code.isdigit() and len(code) == 4:
+                
+                # 🛡️ 過濾邏輯：只留標準 4 位數純個股，排除 00 開頭之 ETF 與特殊證券
+                if code.isdigit() and len(code) == 4 and not code.startswith("00") and not code.startswith("0"):
                     ticker_id = f"{code}.TW"
                     all_tickers.append(ticker_id)
                     DYNAMIC_STOCK_NAMES[ticker_id] = name
@@ -218,10 +220,10 @@ if __name__ == "__main__":
     now_tw = pd.Timestamp.now(tz='UTC').tz_convert('Asia/Taipei')
     tw_time_str = now_tw.strftime('%Y-%m-%d %H:%M:%S')
 
-    print("🚀 啟動【台股 9 大精準選股系統】...")
+    print("🚀 啟動【台股 9 大精準個股選股系統】...")
     tech_scan_pool = fetch_all_taiwan_market_tickers()
 
-    print(f"⏳ 步驟 1: 下載全市場日K、週K與月K資料 (共 {len(tech_scan_pool)} 档)...")
+    print(f"⏳ 步驟 1: 下載全市場個股日K、週K與月K資料 (已排除 ETF，共 {len(tech_scan_pool)} 檔)...")
     full_df_daily = safe_download_yf(tech_scan_pool, period="1y", interval="1d", chunk_size=250)
     full_df_weekly = safe_download_yf(tech_scan_pool, period="2y", interval="1wk", chunk_size=250)
     full_df_monthly = safe_download_yf(tech_scan_pool, period="5y", interval="1mo", chunk_size=250)
@@ -238,7 +240,7 @@ if __name__ == "__main__":
             df_d = full_df_daily.xs(ticker, axis=1, level=1)
             if df_d.empty or len(df_d.dropna(subset=['Close'])) < 120: continue 
             
-            # 🛠️ 修正過濾條件：20日均量 >= 1000張 (Volume 單位為股數)
+            # 🛠️ 過濾條件：20日均量 >= 1000張 (Volume / 1000)
             avg_vol_20_shares = df_d['Volume'].rolling(window=20).mean().iloc[-1]
             if (avg_vol_20_shares / 1000.0) < 1000: continue
 
@@ -264,14 +266,14 @@ if __name__ == "__main__":
             if res3:
                 strat3_map[ticker] = f"{stock_label}[{price3:.2f}元]"
 
-            # 收集適合掃描分 K 的精選名單
+            # 收集適合掃描分 K 的精選個股名單
             heavy_scan_pool.append(ticker)
 
         except Exception:
             continue
 
     # ⏳ 步驟 3: 下載 30分K 與 60分K 資料
-    final_heavy_pool = heavy_scan_pool[:100]  # 彈性擴增掃描名單至 100 檔
+    final_heavy_pool = heavy_scan_pool[:100]
     if final_heavy_pool:
         print(f"⏳ 步驟 3: 下載精選 {len(final_heavy_pool)} 檔標的之 30分K 與 60分K 資料...")
         full_df_30m = safe_download_yf(final_heavy_pool, period="1mo", interval="30m", chunk_size=50)
@@ -300,7 +302,7 @@ if __name__ == "__main__":
                 # 🛠️ 【策略九：反向 - 30m, 60m, 日, 週, 月 KD 皆 < 70 且跌破日10日線】
                 close_d = df_d['Close'].dropna()
                 ma10_d = close_d.rolling(10).mean()
-                if close_d.iloc[-1] < ma10_d.iloc[-1]:  # 跌破 10 日線
+                if close_d.iloc[-1] < ma10_d.iloc[-1]:
                     kd_30m_k, kd_30m_d = get_kd_latest(full_df_30m.xs(ticker, axis=1, level=1)) if ticker in full_df_30m.columns.levels[1] else (None, None)
                     kd_60m_k, kd_60m_d = get_kd_latest(full_df_60m.xs(ticker, axis=1, level=1)) if ticker in full_df_60m.columns.levels[1] else (None, None)
                     kd_d_k, kd_d_d = get_kd_latest(df_d)
@@ -334,7 +336,7 @@ if __name__ == "__main__":
     strat9 = list(strat9_map.values())
 
     # 📝 Telegram 報告組裝
-    tw_msg = f"🇹🇼 <b>【台股 9 大精準選股報告】</b>\n⚠️ <i>已過濾 20日均量 &lt; 1000張之股票</i>\n⏰ 時間: {tw_time_str}\n"
+    tw_msg = f"🇹🇼 <b>【台股 9 大精準個股選股報告】</b>\n⚠️ <i>已排除 ETF & 過濾 20日均量 &lt; 1000張股票</i>\n⏰ 時間: {tw_time_str}\n"
     tw_msg += "───────────────────\n\n"
     
     tw_msg += "🌕 <b>【策略一】月K MACD &gt; 0 + KD &gt; 20</b>\n"
