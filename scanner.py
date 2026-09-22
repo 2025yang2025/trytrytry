@@ -157,13 +157,17 @@ def check_macd_heading_to_zero_kd(df_tf, kd_threshold=20):
     return False, 0.0
 
 def check_strategy_ma20_rebound(df_d, df_w, df_m):
-    """ 🛠️ 新增策略十：月/週趨勢偏多 + 日線 20MA (月線) 有撐且 MACD 柱狀體翻紅/擴展 """
+    """ 🛠️ 精準拉回策略：月/週長線多頭 + 日K 20MA (月線) 有撐且 MACD 柱狀體翻紅 """
     try:
-        # 1. 月 K 檢測: DIF (MACD Line) > 0
+        # 1. 月 K 檢測: DIF > 0 且 (Hist > 0 或 Hist_curr > Hist_prev)
         df_m_clean = df_m.dropna(subset=['Close'])
         if len(df_m_clean) < 26: return False, 0.0
-        dif_m, _, _ = calculate_macd(df_m_clean['Close'].astype(float))
+        dif_m, _, hist_m = calculate_macd(df_m_clean['Close'].astype(float))
         if pd.isna(dif_m.iloc[-1]) or dif_m.iloc[-1] <= 0:
+            return False, 0.0
+        
+        is_m_hist_ok = (hist_m.iloc[-1] > 0) or (hist_m.iloc[-1] > hist_m.iloc[-2])
+        if not is_m_hist_ok:
             return False, 0.0
 
         # 2. 週 K 檢測: DIF > 0 且 (Hist > 0 或 Hist_curr > Hist_prev)
@@ -195,7 +199,7 @@ def check_strategy_ma20_rebound(df_d, df_w, df_m):
         if not is_touch_ma20:
             return False, 0.0
 
-        # MACD 柱狀體翻紅 (上一期 <= 0 且最新一期 > 0)
+        # MACD 柱狀體翻紅 (上一期 <= 0 且最新一期 > 0) 或 柱狀體向上擴展
         _, _, hist_d = calculate_macd(close_d)
         is_hist_turn_red = (hist_d.iloc[-2] <= 0 and hist_d.iloc[-1] > 0) or (hist_d.iloc[-1] > 0 and hist_d.iloc[-1] > hist_d.iloc[-2])
 
@@ -315,7 +319,7 @@ if __name__ == "__main__":
             if res3:
                 strat3_map[ticker] = f"{stock_label}[{price3:.2f}元]"
 
-            # 🛠️ 【新策略：月/週長線多頭 + 日K 20MA (月線) 有撐且 MACD 柱狀體翻紅】
+            # 🛠️ 【精準拉回策略：月/週趨勢多頭 + 日K 20MA (月線) 有撐且 MACD 柱狀體翻紅】
             if (ticker in full_df_monthly.columns.levels[1]) and (ticker in full_df_weekly.columns.levels[1]):
                 df_m = full_df_monthly.xs(ticker, axis=1, level=1)
                 df_w = full_df_weekly.xs(ticker, axis=1, level=1)
