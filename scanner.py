@@ -240,9 +240,9 @@ if __name__ == "__main__":
             df_d = full_df_daily.xs(ticker, axis=1, level=1)
             if df_d.empty or len(df_d.dropna(subset=['Close'])) < 120: continue 
             
-            # 🛠️ 嚴格門檻：20日均量 >= 1000張 (Volume / 1000.0 >= 1000)
+            # 🛠️ 嚴格門檻：20日均量 >= 2500張 (Volume / 1000.0 >= 2500)
             avg_vol_20_shares = df_d['Volume'].rolling(window=20).mean().iloc[-1]
-            if (avg_vol_20_shares / 1000.0) < 1000: continue
+            if (avg_vol_20_shares / 1000.0) < 2500: continue
 
             name_zh = DYNAMIC_STOCK_NAMES.get(ticker, "")
             stock_label = f"<code>{ticker}</code>(<i>{name_zh}</i>)" if name_zh else f"<code>{ticker}</code>"
@@ -336,7 +336,7 @@ if __name__ == "__main__":
     strat9 = list(strat9_map.values())
 
     # 📝 Telegram 報告組裝
-    tw_msg = f"🇹🇼 <b>【台股 9 大精準個股選股報告】</b>\n⚠️ <i>已排除 ETF & 過濾 20日均量 &lt; 1000張股票</i>\n⏰ 時間: {tw_time_str}\n"
+    tw_msg = f"🇹🇼 <b>【台股 9 大精準個股選股報告】</b>\n⚠️ <i>已排除 ETF & 過濾 20日均量 &lt; 2500張股票</i>\n⏰ 時間: {tw_time_str}\n"
     tw_msg += "───────────────────\n\n"
     
     tw_msg += "🌕 <b>【策略一】月K MACD &gt; 0 + KD &gt; 20</b>\n"
