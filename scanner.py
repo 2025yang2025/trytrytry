@@ -74,9 +74,10 @@ def safe_download_yf(tickers, period, interval, chunk_size=250):
 def calculate_macd(close_series, fast=12, slow=26, signal=9):
     fast_ema = close_series.ewm(span=fast, adjust=False).mean()
     slow_ema = close_series.ewm(span=slow, adjust=False).mean()
-    macd_line = fast_ema - slow_ema
-    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
-    return macd_line, signal_line, macd_line - signal_line
+    macd_line = fast_ema - slow_ema  # 即 DIF
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()  # 即 DEM / MACD
+    histogram = macd_line - signal_line  # 柱狀體
+    return macd_line, signal_line, histogram
 
 def calculate_kd(df_single, n=9, m1=3, m2=3):
     """ 嚴謹計算 KD 值 """
@@ -140,8 +141,6 @@ def check_macd_heading_to_zero_kd(df_tf, kd_threshold=20):
         c_tf = df_clean['Close'].astype(float)
 
         macd_line, _, _ = calculate_macd(c_tf)
-        
-        # MACD 往 0 軸向上 (在零軸之下，且最新一筆 MACD 大於前一筆)
         is_macd_heading_up = (macd_line.iloc[-1] < 0) and (macd_line.iloc[-1] > macd_line.iloc[-2])
 
         k_ser, d_ser = calculate_kd(df_clean)
@@ -153,6 +152,56 @@ def check_macd_heading_to_zero_kd(df_tf, kd_threshold=20):
 
         if is_macd_heading_up and is_kd_cond:
             return True, c_tf.iloc[-1]
+    except Exception:
+        pass
+    return False, 0.0
+
+def check_strategy_ma20_rebound(df_d, df_w, df_m):
+    """ 🛠️ 新增策略十：月/週趨勢偏多 + 日線 20MA (月線) 有撐且 MACD 柱狀體翻紅/擴展 """
+    try:
+        # 1. 月 K 檢測: DIF (MACD Line) > 0
+        df_m_clean = df_m.dropna(subset=['Close'])
+        if len(df_m_clean) < 26: return False, 0.0
+        dif_m, _, _ = calculate_macd(df_m_clean['Close'].astype(float))
+        if pd.isna(dif_m.iloc[-1]) or dif_m.iloc[-1] <= 0:
+            return False, 0.0
+
+        # 2. 週 K 檢測: DIF > 0 且 (Hist > 0 或 Hist_curr > Hist_prev)
+        df_w_clean = df_w.dropna(subset=['Close'])
+        if len(df_w_clean) < 26: return False, 0.0
+        dif_w, _, hist_w = calculate_macd(df_w_clean['Close'].astype(float))
+        if pd.isna(dif_w.iloc[-1]) or dif_w.iloc[-1] <= 0:
+            return False, 0.0
+        
+        is_w_hist_ok = (hist_w.iloc[-1] > 0) or (hist_w.iloc[-1] > hist_w.iloc[-2])
+        if not is_w_hist_ok:
+            return False, 0.0
+
+        # 3. 日 K 檢測: 回測 20MA 有撐 且 MACD 柱狀體翻紅
+        df_d_clean = df_d.dropna(subset=['Close', 'High', 'Low'])
+        if len(df_d_clean) < 35: return False, 0.0
+        
+        close_d = df_d_clean['Close'].astype(float)
+        low_d = df_d_clean['Low'].astype(float)
+        ma20 = close_d.rolling(20).mean()
+        
+        c_val = close_d.iloc[-1]
+        l_val = low_d.iloc[-1]
+        ma20_val = ma20.iloc[-1]
+
+        # 日線支撐判斷: 當日低點有碰到月線且收盤站上，或者收盤價離月線很近 (0.985 ~ 1.025 倍)
+        is_touch_ma20 = (l_val <= ma20_val and c_val >= ma20_val) or (0.985 <= (c_val / ma20_val) <= 1.025)
+        
+        if not is_touch_ma20:
+            return False, 0.0
+
+        # MACD 柱狀體翻紅 (上一期 <= 0 且最新一期 > 0)
+        _, _, hist_d = calculate_macd(close_d)
+        is_hist_turn_red = (hist_d.iloc[-2] <= 0 and hist_d.iloc[-1] > 0) or (hist_d.iloc[-1] > 0 and hist_d.iloc[-1] > hist_d.iloc[-2])
+
+        if is_hist_turn_red:
+            return True, c_val
+
     except Exception:
         pass
     return False, 0.0
@@ -220,7 +269,7 @@ if __name__ == "__main__":
     now_tw = pd.Timestamp.now(tz='UTC').tz_convert('Asia/Taipei')
     tw_time_str = now_tw.strftime('%Y-%m-%d %H:%M:%S')
 
-    print("🚀 啟動【台股 9 大精準個股選股系統】...")
+    print("🚀 啟動【台股精準個股選股系統】...")
     tech_scan_pool = fetch_all_taiwan_market_tickers()
 
     print(f"⏳ 步驟 1: 下載全市場個股日K、週K與月K資料 (已排除 ETF，共 {len(tech_scan_pool)} 檔)...")
@@ -230,10 +279,10 @@ if __name__ == "__main__":
 
     strat1_map, strat2_map, strat3_map = {}, {}, {}
     strat4_map, strat5_map = {}, {}
-    strat9_map = {}
+    strat9_map, strat10_map = {}, {}
     heavy_scan_pool = []
 
-    print("⏳ 步驟 2: 進行月K、週K、日K策略篩選...")
+    print("⏳ 步驟 2: 進行多週期與 MA20 支撐策略篩選...")
     for ticker in tech_scan_pool:
         try:
             if ticker not in full_df_daily.columns.levels[1]: continue
@@ -265,6 +314,14 @@ if __name__ == "__main__":
             res3, price3 = check_macd_above_zero_kd(df_d, kd_threshold=20)
             if res3:
                 strat3_map[ticker] = f"{stock_label}[{price3:.2f}元]"
+
+            # 🛠️ 【新策略：月/週長線多頭 + 日K 20MA (月線) 有撐且 MACD 柱狀體翻紅】
+            if (ticker in full_df_monthly.columns.levels[1]) and (ticker in full_df_weekly.columns.levels[1]):
+                df_m = full_df_monthly.xs(ticker, axis=1, level=1)
+                df_w = full_df_weekly.xs(ticker, axis=1, level=1)
+                res10, price10 = check_strategy_ma20_rebound(df_d, df_w, df_m)
+                if res10:
+                    strat10_map[ticker] = f"{stock_label}[{price10:.2f}元]"
 
             # 收集適合掃描分 K 的精選個股名單
             heavy_scan_pool.append(ticker)
@@ -334,11 +391,15 @@ if __name__ == "__main__":
     strat4 = list(strat4_map.values())
     strat5 = list(strat5_map.values())
     strat9 = list(strat9_map.values())
+    strat10 = list(strat10_map.values())
 
     # 📝 Telegram 報告組裝
-    tw_msg = f"🇹🇼 <b>【台股 9 大精準個股選股報告】</b>\n⚠️ <i>已排除 ETF & 過濾 20日均量 &lt; 2500張股票</i>\n⏰ 時間: {tw_time_str}\n"
+    tw_msg = f"🇹🇼 <b>【台股精準個股選股報告】</b>\n⚠️ <i>已排除 ETF & 過濾 20日均量 &lt; 2500張股票</i>\n⏰ 時間: {tw_time_str}\n"
     tw_msg += "───────────────────\n\n"
     
+    tw_msg += "🚀 <b>【精準拉回策略】月/週趨勢多頭 + 日K月線打腳且柱狀體翻紅</b>\n"
+    tw_msg += f"↳ {', '.join(strat10) if strat10 else '無符合標的。 💤'}\n\n"
+
     tw_msg += "🌕 <b>【策略一】月K MACD &gt; 0 + KD &gt; 20</b>\n"
     tw_msg += f"↳ {', '.join(strat1) if strat1 else '無符合標的。 💤'}\n\n"
 
